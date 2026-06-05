@@ -11,6 +11,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
   windows:
     runs-on: windows-latest
@@ -79,3 +82,14 @@ jobs:
         with:
           name: MeshMux-Windows
           path: release/*.exe
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: MeshMux ${{ env.MESHMUX_VERSION }}
+          body: |
+            MeshMux ${{ env.MESHMUX_VERSION }} 正式版。
+
+            安装包内置 mihomo、geoip.metadb 和 MetaCubeXD。第三方组件来源见 THIRD_PARTY_NOTICES.md。
+          files: release/*.exe

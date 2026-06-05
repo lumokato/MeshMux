@@ -14,7 +14,7 @@ import (
 	"github.com/meshmux/meshmux/internal/updater"
 )
 
-const version = "0.1.0"
+var version = "0.1.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
