@@ -239,9 +239,9 @@ func Render(cfg *config.Config, target config.Target) (string, error) {
 	}
 
 	mobile := isMobileTarget(target)
+	linef(&b, "mixed-port: %d", cfg.Ports.Mixed)
+	linef(&b, "allow-lan: false")
 	if !mobile {
-		linef(&b, "mixed-port: %d", cfg.Ports.Mixed)
-		linef(&b, "allow-lan: false")
 		linef(&b, "bind-address: 127.0.0.1")
 	}
 	linef(&b, "mode: rule")

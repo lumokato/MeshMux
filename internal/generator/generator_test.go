@@ -3,6 +3,8 @@ package generator
 import (
 	"strings"
 	"testing"
+
+	"github.com/meshmux/meshmux/internal/config"
 )
 
 func TestNormalizeProviderDataExtractsProxiesBlock(t *testing.T) {
@@ -47,5 +49,23 @@ func TestProviderNodeNamesReadsInlineJSONName(t *testing.T) {
 	})
 	if strings.Join(names, ",") != "node-a,node-b" {
 		t.Fatalf("names = %#v", names)
+	}
+}
+
+func TestMobileProfileKeepsMixedPort(t *testing.T) {
+	enabledDNS := true
+	cfg := &config.Config{
+		Ports: config.Ports{Mixed: 2080, Controller: "127.0.0.1:9090"},
+		DNS:   config.DNS{Enabled: &enabledDNS},
+	}
+	text, err := Render(cfg, config.Target{Name: "mobile", Type: "mobile-mihomo", Output: "profiles/mobile.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "mixed-port: 2080\n") {
+		t.Fatalf("mobile profile missing mixed-port:\n%s", text)
+	}
+	if strings.Contains(text, "external-controller:") {
+		t.Fatalf("mobile profile contains desktop controller:\n%s", text)
 	}
 }
