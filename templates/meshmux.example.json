@@ -1,0 +1,107 @@
+{
+  "name": "default",
+  "setup": {
+    "providerUrl": "",
+    "subStoreUrl": "",
+    "subStoreBackend": "",
+    "subStoreFileName": ""
+  },
+  "ports": {
+    "mixed": 2080,
+    "controller": "127.0.0.1:9090"
+  },
+  "paths": {
+    "runtime": "runtime",
+    "dashboard": "dashboard"
+  },
+  "components": {},
+  "tun": {
+    "enabled": false,
+    "stack": "mixed",
+    "autoRoute": false,
+    "autoDetectInterface": true,
+    "strictRoute": false,
+    "dnsHijack": []
+  },
+  "dns": {
+    "enabled": true,
+    "defaultNameservers": [
+      "223.5.5.5",
+      "114.114.114.114"
+    ],
+    "directNameservers": [
+      "223.5.5.5",
+      "114.114.114.114"
+    ],
+    "proxyServerNameservers": [
+      "223.5.5.5",
+      "114.114.114.114"
+    ],
+    "nameservers": [
+      "https://dns.alidns.com/dns-query",
+      "https://doh.pub/dns-query"
+    ],
+    "fallbacks": [
+      "https://dns.google/dns-query"
+    ],
+    "nameserverPolicy": {
+      "+.i.example.com": [
+        "https://dns.alidns.com/dns-query",
+        "https://doh.pub/dns-query"
+      ]
+    }
+  },
+  "wireguard": {
+    "configs": [],
+    "remoteDnsResolve": false,
+    "domains": [],
+    "routes": []
+  },
+  "tailscale": {
+    "enabled": false,
+    "controlUrl": "https://controlplane.tailscale.com",
+    "authKey": "",
+    "authKeyFile": "",
+    "acceptRoutes": true,
+    "ephemeral": false,
+    "exitNode": "",
+    "exitNodeAllowLanAccess": false,
+    "magicDnsSuffix": "",
+    "routes": [
+      "100.64.0.0/10"
+    ],
+    "ipv6Routes": [
+      "fd7a:115c:a1e0::/48"
+    ],
+    "domains": [
+      "*.i.example.com",
+      "*.ts.net"
+    ]
+  },
+  "rules": {
+    "directCidrs": [
+      "127.0.0.0/8",
+      "10.0.0.0/8",
+      "172.16.0.0/12",
+      "192.168.0.0/16",
+      "169.254.0.0/16"
+    ],
+    "directDomains": [
+      "localhost",
+      "*.local"
+    ],
+    "proxyDomains": [
+      "*.google.com",
+      "*.gstatic.com",
+      "*.googleapis.com",
+      "*.googlevideo.com",
+      "*.googleusercontent.com",
+      "*.gvt1.com",
+      "*.gvt2.com",
+      "*.ggpht.com",
+      "*.ytimg.com",
+      "*.youtube.com",
+      "*.google.fastly-edge.com"
+    ]
+  }
+}

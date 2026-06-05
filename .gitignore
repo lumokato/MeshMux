@@ -1,0 +1,15 @@
+# Local secrets
+.env
+.env.*
+secrets/
+
+# Build outputs
+build/
+release/
+dist/
+*.exe
+*.pdb
+
+# OS noise
+Thumbs.db
+Desktop.ini

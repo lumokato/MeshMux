@@ -1,0 +1,81 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version"
+        required: true
+        default: "0.1.0"
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Resolve version
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          if (-not $version) {
+            $version = "${{ github.ref_name }}".TrimStart("v")
+          }
+          "MESHMUX_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Build Go binaries
+        shell: pwsh
+        run: |
+          go test ./...
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          go build -ldflags "-H=windowsgui -s -w -X main.version=$env:MESHMUX_VERSION" -o build\MeshMux.exe .\cmd\meshmux-tray
+          go build -ldflags "-s -w" -o build\meshmux-cli.exe .\cmd\meshmux
+
+      - name: Prepare bundled components
+        shell: pwsh
+        run: |
+          $repo = (Get-Location).Path
+          $components = Join-Path $env:RUNNER_TEMP "meshmux-components"
+          Remove-Item -LiteralPath $components -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path build\bin,$components | Out-Null
+
+          Push-Location $components
+          & "$repo\build\meshmux-cli.exe" download mihomo -config "$repo\templates\meshmux.example.json"
+          Copy-Item bin\mihomo.exe "$repo\build\bin\mihomo.exe" -Force
+
+          $geoip = "downloads\geoip.metadb"
+          Invoke-WebRequest `
+            -Uri "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb" `
+            -OutFile $geoip `
+            -UseBasicParsing
+          Copy-Item $geoip "$repo\build\bin\geoip.metadb" -Force
+
+          & "$repo\build\meshmux-cli.exe" download dashboard -config "$repo\templates\meshmux.example.json"
+          Copy-Item dashboard "$repo\build\dashboard" -Recurse -Force
+          Pop-Location
+
+          Copy-Item templates\meshmux.example.json build\meshmux.example.json -Force
+          Copy-Item README.md build\README.md -Force
+          Copy-Item SECURITY.md build\SECURITY.md -Force
+          Copy-Item LICENSE build\LICENSE -Force
+          Copy-Item THIRD_PARTY_NOTICES.md build\THIRD_PARTY_NOTICES.md -Force
+
+      - name: Build installer
+        shell: pwsh
+        run: ISCC.exe .\installer\MeshMux.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MeshMux-Windows
+          path: release/*.exe

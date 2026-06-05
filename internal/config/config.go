@@ -1,0 +1,476 @@
+package config
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+)
+
+const (
+	AppName           = "MeshMux"
+	DefaultConfigPath = "meshmux.local.json"
+	ExampleConfigPath = "templates/meshmux.example.json"
+)
+
+type Config struct {
+	Name       string          `json:"name"`
+	Setup      Setup           `json:"setup"`
+	Ports      Ports           `json:"ports"`
+	Paths      Paths           `json:"paths"`
+	Providers  []Provider      `json:"providers,omitempty"`
+	WireGuard  WireGuard       `json:"wireguard"`
+	Tailscale  Tailscale       `json:"tailscale"`
+	TUN        TUN             `json:"tun"`
+	DNS        DNS             `json:"dns"`
+	Rules      Rules           `json:"rules"`
+	Targets    []Target        `json:"targets,omitempty"`
+	Publish    []PublishTarget `json:"publish,omitempty"`
+	Components Components      `json:"components"`
+}
+
+type Setup struct {
+	ProviderURL      string `json:"providerUrl,omitempty"`
+	SubStoreURL      string `json:"subStoreUrl"`
+	SubStoreBackend  string `json:"subStoreBackend"`
+	SubStoreFileName string `json:"subStoreFileName"`
+}
+
+type Ports struct {
+	Mixed      int    `json:"mixed"`
+	Controller string `json:"controller"`
+}
+
+type Paths struct {
+	Runtime   string `json:"runtime"`
+	Dashboard string `json:"dashboard"`
+}
+
+type Provider struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	URL      string `json:"url"`
+	Interval int    `json:"interval"`
+	Path     string `json:"path"`
+}
+
+type WireGuard struct {
+	Configs          []string `json:"configs"`
+	RemoteDNSResolve bool     `json:"remoteDnsResolve"`
+	Domains          []string `json:"domains"`
+	Routes           []string `json:"routes"`
+}
+
+type Tailscale struct {
+	Enabled                bool     `json:"enabled"`
+	ControlURL             string   `json:"controlUrl"`
+	AuthKey                string   `json:"authKey"`
+	AuthKeyFile            string   `json:"authKeyFile"`
+	AcceptRoutes           bool     `json:"acceptRoutes"`
+	Ephemeral              bool     `json:"ephemeral"`
+	ExitNode               string   `json:"exitNode"`
+	ExitNodeAllowLANAccess bool     `json:"exitNodeAllowLanAccess"`
+	MagicDNSSuffix         string   `json:"magicDnsSuffix"`
+	Routes                 []string `json:"routes"`
+	IPv6Routes             []string `json:"ipv6Routes"`
+	Domains                []string `json:"domains"`
+}
+
+type TUN struct {
+	Enabled             bool     `json:"enabled"`
+	Stack               string   `json:"stack"`
+	AutoRoute           bool     `json:"autoRoute"`
+	AutoDetectInterface bool     `json:"autoDetectInterface"`
+	StrictRoute         bool     `json:"strictRoute"`
+	DNSHijack           []string `json:"dnsHijack"`
+}
+
+type DNS struct {
+	Enabled                *bool               `json:"enabled"`
+	DefaultNameservers     []string            `json:"defaultNameservers"`
+	DirectNameservers      []string            `json:"directNameservers"`
+	ProxyServerNameservers []string            `json:"proxyServerNameservers"`
+	Nameservers            []string            `json:"nameservers"`
+	Fallbacks              []string            `json:"fallbacks"`
+	NameserverPolicy       map[string][]string `json:"nameserverPolicy"`
+}
+
+type Rules struct {
+	DirectCIDRs   []string `json:"directCidrs"`
+	DirectDomains []string `json:"directDomains"`
+	ProxyDomains  []string `json:"proxyDomains"`
+}
+
+type Target struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Hostname string `json:"hostname"`
+	Output   string `json:"output"`
+}
+
+type PublishTarget struct {
+	Name      string `json:"name"`
+	Type      string `json:"type"`
+	Input     string `json:"input"`
+	RemoteURL string `json:"remoteUrl"`
+	APIURL    string `json:"apiUrl"`
+	BaseURL   string `json:"baseUrl"`
+	Backend   string `json:"backend"`
+	APIPath   string `json:"apiPath"`
+	TokenEnv  string `json:"tokenEnv"`
+	FileName  string `json:"fileName"`
+}
+
+type Components struct {
+	Mihomo    Component `json:"mihomo"`
+	Dashboard Component `json:"dashboard"`
+}
+
+type Component struct {
+	Path         string `json:"path"`
+	Repo         string `json:"repo"`
+	AssetPattern string `json:"assetPattern"`
+}
+
+func ResolveConfigPath(path string) string {
+	if path != "" {
+		return path
+	}
+	if _, err := os.Stat(DefaultConfigPath); err == nil {
+		return DefaultConfigPath
+	}
+	if local := LocalConfigPath(); local != DefaultConfigPath {
+		if _, err := os.Stat(local); err == nil {
+			return local
+		}
+	}
+	return ExampleConfigPath
+}
+
+func LocalDataDir() string {
+	if dir := strings.TrimSpace(os.Getenv("MESHMUX_HOME")); dir != "" {
+		return dir
+	}
+	if runtime.GOOS == "windows" {
+		if dir := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); dir != "" {
+			return filepath.Join(dir, AppName)
+		}
+	}
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		return filepath.Join(dir, AppName)
+	}
+	return "."
+}
+
+func LocalConfigPath() string {
+	return filepath.Join(LocalDataDir(), DefaultConfigPath)
+}
+
+func EnsureLocalConfig(examplePath string) (string, error) {
+	dir := LocalDataDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, DefaultConfigPath)
+	if _, err := os.Stat(path); err == nil {
+		return path, nil
+	}
+	if examplePath == "" {
+		examplePath = ExampleConfigPath
+	}
+	data, err := os.ReadFile(examplePath)
+	if err != nil {
+		data, err = os.ReadFile(ExampleConfigPath)
+		if err != nil {
+			return "", err
+		}
+	}
+	return path, os.WriteFile(path, data, 0600)
+}
+
+func Load(path string) (*Config, string, error) {
+	resolved := ResolveConfigPath(path)
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		return nil, resolved, err
+	}
+	data = bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, resolved, err
+	}
+	cfg.ApplyDefaults()
+	return &cfg, resolved, nil
+}
+
+func InitLocal(overwrite bool) error {
+	if !overwrite {
+		if _, err := os.Stat(DefaultConfigPath); err == nil {
+			return errors.New(DefaultConfigPath + " already exists")
+		}
+	}
+	data, err := os.ReadFile(ExampleConfigPath)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(DefaultConfigPath, data, 0600)
+}
+
+func (c *Config) ApplyDefaults() {
+	if c.Name == "" {
+		c.Name = "default"
+	}
+	if c.Ports.Mixed == 0 {
+		c.Ports.Mixed = 2080
+	}
+	if c.Ports.Controller == "" {
+		c.Ports.Controller = "127.0.0.1:9090"
+	}
+	if c.Paths.Runtime == "" {
+		c.Paths.Runtime = "runtime"
+	}
+	if c.Paths.Dashboard == "" {
+		c.Paths.Dashboard = "dashboard"
+	}
+	if c.Rules.DirectCIDRs == nil {
+		c.Rules.DirectCIDRs = []string{"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"}
+	}
+	if c.Rules.DirectDomains == nil {
+		c.Rules.DirectDomains = []string{"localhost", "*.local"}
+	}
+	if c.Tailscale.ControlURL == "" {
+		c.Tailscale.ControlURL = "https://controlplane.tailscale.com"
+	}
+	if c.Tailscale.Routes == nil {
+		c.Tailscale.Routes = []string{"100.64.0.0/10"}
+	}
+	if c.Tailscale.IPv6Routes == nil {
+		c.Tailscale.IPv6Routes = []string{"fd7a:115c:a1e0::/48"}
+	}
+	if c.Components.Mihomo.Path == "" {
+		c.Components.Mihomo.Path = filepath.Join("bin", "mihomo.exe")
+	}
+	if c.Components.Mihomo.Repo == "" {
+		c.Components.Mihomo.Repo = "MetaCubeX/mihomo"
+	}
+	if c.Components.Mihomo.AssetPattern == "" {
+		c.Components.Mihomo.AssetPattern = `mihomo-windows-amd64-compatible.*\.zip$`
+	}
+	if c.Components.Dashboard.Path == "" {
+		c.Components.Dashboard.Path = "dashboard"
+	}
+	if c.Components.Dashboard.Repo == "" {
+		c.Components.Dashboard.Repo = "MetaCubeX/metacubexd"
+	}
+	if c.Components.Dashboard.AssetPattern == "" {
+		c.Components.Dashboard.AssetPattern = `compressed-dist\.tgz$`
+	}
+	c.deriveSetup()
+	c.deriveTailnetDomains()
+	c.ApplySetup()
+}
+
+func (c Config) StorageCopy() Config {
+	c.ApplyDefaults()
+	c.Providers = nil
+	c.Targets = nil
+	c.Publish = nil
+	return c
+}
+
+func (c *Config) ApplySetup() {
+	c.Setup.ProviderURL = strings.TrimSpace(c.Setup.ProviderURL)
+	c.Setup.SubStoreURL = strings.TrimSpace(c.Setup.SubStoreURL)
+	c.Setup.SubStoreBackend = strings.Trim(strings.TrimSpace(c.Setup.SubStoreBackend), "/")
+	c.Setup.SubStoreFileName = strings.TrimSpace(c.Setup.SubStoreFileName)
+
+	c.Providers = []Provider{{
+		Name:     "main",
+		Type:     "substore",
+		URL:      c.Setup.ProviderURL,
+		Path:     filepath.Join("providers", "main.yaml"),
+		Interval: 3600,
+	}}
+	c.Targets = []Target{
+		{Name: "windows", Type: "windows-mihomo", Hostname: "windows-meshmux", Output: filepath.Join("profiles", "windows.yaml")},
+		{Name: "mobile", Type: "mobile-mihomo", Hostname: "mobile-meshmux", Output: filepath.Join("profiles", "mobile.yaml")},
+	}
+	c.Publish = []PublishTarget{{
+		Name:     "mobile-substore",
+		Type:     "substore-files",
+		Input:    filepath.Join("profiles", "mobile.yaml"),
+		BaseURL:  c.Setup.SubStoreURL,
+		Backend:  c.Setup.SubStoreBackend,
+		FileName: c.Setup.SubStoreFileName,
+		TokenEnv: "MESHMUX_SUBSTORE_TOKEN",
+	}}
+}
+
+func (c *Config) deriveSetup() {
+	if c.Setup.ProviderURL == "" {
+		for _, provider := range c.Providers {
+			if strings.TrimSpace(provider.URL) != "" {
+				c.Setup.ProviderURL = strings.TrimSpace(provider.URL)
+				break
+			}
+		}
+	}
+	if c.Setup.SubStoreURL != "" && c.Setup.SubStoreBackend != "" {
+		return
+	}
+	for _, target := range c.Publish {
+		if c.Setup.SubStoreURL == "" && target.BaseURL != "" && !strings.Contains(target.BaseURL, "example") {
+			c.Setup.SubStoreURL = target.BaseURL
+		}
+		if c.Setup.SubStoreBackend == "" && target.Backend != "" {
+			c.Setup.SubStoreBackend = target.Backend
+		}
+		if c.Setup.SubStoreFileName == "" && target.FileName != "" {
+			c.Setup.SubStoreFileName = strings.TrimSpace(target.FileName)
+		}
+		if c.Setup.SubStoreURL == "" || c.Setup.SubStoreBackend == "" {
+			c.deriveSubStoreFromAPIURL(target.APIURL)
+			if !strings.Contains(target.BaseURL, "example") {
+				c.deriveSubStoreFromAPIURL(joinLegacyAPI(target.BaseURL, target.APIPath))
+			}
+		}
+	}
+	if c.Setup.SubStoreURL == "" || c.Setup.SubStoreBackend == "" {
+		c.deriveSubStoreFromProviderURL(c.Setup.ProviderURL)
+	}
+}
+
+func (c *Config) deriveTailnetDomains() {
+	root := rootDomain(c.Setup.SubStoreURL)
+	if root == "" {
+		root = rootDomain(c.Setup.ProviderURL)
+	}
+	if root == "" {
+		return
+	}
+	domain := "*.i." + root
+	c.Tailscale.Domains = replaceOrAppend(c.Tailscale.Domains, "*.i.example.com", domain)
+	if c.DNS.NameserverPolicy != nil {
+		if values, ok := c.DNS.NameserverPolicy["+.i.example.com"]; ok {
+			delete(c.DNS.NameserverPolicy, "+.i.example.com")
+			c.DNS.NameserverPolicy["+.i."+root] = values
+		}
+	}
+}
+
+func rootDomain(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	parts := strings.Split(u.Hostname(), ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	return strings.Join(parts[len(parts)-2:], ".")
+}
+
+func replaceOrAppend(values []string, placeholder, value string) []string {
+	if value == "" {
+		return values
+	}
+	if len(values) == 0 {
+		return []string{value}
+	}
+	for i, item := range values {
+		if item == value {
+			return values
+		}
+		if item == placeholder {
+			values[i] = value
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func (c *Config) deriveSubStoreFromAPIURL(raw string) {
+	if strings.TrimSpace(raw) == "" {
+		return
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	for i := 0; i+2 < len(parts); i++ {
+		if parts[i+1] == "api" && parts[i+2] == "files" {
+			if c.Setup.SubStoreBackend == "" {
+				c.Setup.SubStoreBackend = parts[i]
+			}
+			if c.Setup.SubStoreURL == "" {
+				u.Path = strings.Join(parts[:i], "/")
+				u.RawQuery = ""
+				u.Fragment = ""
+				c.Setup.SubStoreURL = strings.TrimRight(u.String(), "/") + "/"
+			}
+			return
+		}
+	}
+}
+
+func (c *Config) deriveSubStoreFromProviderURL(raw string) {
+	if strings.TrimSpace(raw) == "" {
+		return
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return
+	}
+	if c.Setup.SubStoreBackend == "" {
+		c.Setup.SubStoreBackend = parts[0]
+	}
+	if c.Setup.SubStoreURL == "" {
+		u.Path = ""
+		u.RawQuery = ""
+		u.Fragment = ""
+		c.Setup.SubStoreURL = strings.TrimRight(u.String(), "/") + "/"
+	}
+}
+
+func joinLegacyAPI(base, path string) string {
+	if base == "" || path == "" {
+		return ""
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return ""
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/" + strings.TrimLeft(path, "/")
+	return u.String()
+}
+
+func (c *Config) Target(name string) (Target, bool) {
+	for _, target := range c.Targets {
+		if target.Name == name {
+			return target, true
+		}
+	}
+	return Target{}, false
+}
+
+func (c *Config) PublishTarget(name string) (PublishTarget, bool) {
+	for _, target := range c.Publish {
+		if target.Name == name {
+			return target, true
+		}
+	}
+	return PublishTarget{}, false
+}
