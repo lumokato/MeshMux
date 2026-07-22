@@ -6,7 +6,7 @@ on:
       version:
         description: "Release version"
         required: true
-        default: "0.1.0"
+        default: "0.1.1"
   push:
     tags:
       - "v*"
@@ -43,7 +43,7 @@ jobs:
           go test ./...
           New-Item -ItemType Directory -Force -Path build | Out-Null
           go build -ldflags "-H=windowsgui -s -w -X main.version=$env:MESHMUX_VERSION" -o build\MeshMux.exe .\cmd\meshmux-tray
-          go build -ldflags "-s -w" -o build\meshmux-cli.exe .\cmd\meshmux
+          go build -ldflags "-s -w -X main.version=$env:MESHMUX_VERSION" -o build\meshmux-cli.exe .\cmd\meshmux
 
       - name: Prepare bundled components
         shell: pwsh
