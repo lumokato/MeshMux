@@ -199,3 +199,44 @@ func TestStatusAPIContainsCommonItems(t *testing.T) {
 		}
 	}
 }
+
+func TestRecentStatusLogsReadTailAndRedactSecrets(t *testing.T) {
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+	if err := os.MkdirAll("logs", 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join("logs", "mihomo.err.log")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const size = int64(256 * 1024 * 1024)
+	if err := file.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	marker := []byte("level=error subscription=https://secret.example/path PrivateKey=tail-secret\n")
+	if _, err := file.WriteAt(marker, size-int64(len(marker))); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	text := strings.Join(recentStatusLogs(), "\n")
+	if !strings.Contains(text, "level=error") {
+		t.Fatalf("error line missing: %q", text)
+	}
+	for _, secret := range []string{"secret.example", "tail-secret"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("status log contains %q: %q", secret, text)
+		}
+	}
+}

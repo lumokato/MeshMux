@@ -4,8 +4,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/meshmux/meshmux/internal/config"
 	"github.com/meshmux/meshmux/internal/generator"
@@ -29,6 +32,8 @@ func run(args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "_supervise":
+		return runSupervisor(args[1:])
 	case "version":
 		fmt.Println(version)
 		return nil
@@ -133,7 +138,7 @@ func run(args []string) error {
 		}
 		return runner.TestConfig(cfg, profile)
 	case "start":
-		cfg, _, err := load(args[1:])
+		cfg, configPath, err := load(args[1:])
 		if err != nil {
 			return err
 		}
@@ -142,12 +147,15 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return runner.Start(cfg, profile)
+		return startDetached(cfg, configPath, profile)
 	case "stop":
-		return runner.Stop()
-	case "restart":
-		_ = runner.Stop()
 		cfg, _, err := load(args[1:])
+		if err != nil {
+			return err
+		}
+		return runner.Stop(cfg)
+	case "restart":
+		cfg, configPath, err := load(args[1:])
 		if err != nil {
 			return err
 		}
@@ -156,7 +164,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return runner.Start(cfg, profile)
+		return startDetached(cfg, configPath, profile)
 	case "status":
 		cfg, _, err := load(args[1:])
 		if err != nil {
@@ -191,10 +199,125 @@ func load(args []string) (*config.Config, string, error) {
 	if err != nil {
 		return nil, path, err
 	}
-	if err := enterRuntimeDir(path); err != nil {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
 		return nil, path, err
 	}
-	return cfg, path, nil
+	if err := enterRuntimeDir(absPath); err != nil {
+		return nil, path, err
+	}
+	return cfg, absPath, nil
+}
+
+func runSupervisor(args []string) error {
+	readyPath := optionValue(args, "ready")
+	profile := optionValue(args, "profile")
+	if strings.TrimSpace(profile) == "" {
+		return fmt.Errorf("supervisor profile is required")
+	}
+	cfg, _, err := load(args)
+	if err != nil {
+		writeSupervisorError(readyPath, err)
+		return err
+	}
+	var ready func(int) error
+	if readyPath != "" {
+		ready = func(pid int) error {
+			if err := os.MkdirAll(filepath.Dir(readyPath), 0755); err != nil {
+				return err
+			}
+			return os.WriteFile(readyPath, []byte(strconv.Itoa(pid)+"\n"), 0600)
+		}
+	}
+	if err := runner.Supervise(cfg, profile, ready); err != nil {
+		writeSupervisorError(readyPath, err)
+		return err
+	}
+	return nil
+}
+
+func startDetached(cfg *config.Config, configPath, profile string) error {
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	profileAbs, err := filepath.Abs(profile)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll("state", 0755); err != nil {
+		return err
+	}
+	readyPath, err := filepath.Abs(filepath.Join("state", fmt.Sprintf("supervisor.%d.%d.ready", os.Getpid(), time.Now().UnixNano())))
+	if err != nil {
+		return err
+	}
+	errorPath := readyPath + ".error"
+	defer os.Remove(readyPath)
+	defer os.Remove(errorPath)
+
+	cmd := exec.Command(executable, "_supervise", "-config", configPath, "-profile", profileAbs, "-ready", readyPath)
+	configureDetachedCommand(cmd)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if err := cmd.Process.Release(); err != nil {
+		_ = cmd.Process.Kill()
+		return err
+	}
+
+	deadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(errorPath); err == nil {
+			message := strings.TrimSpace(string(data))
+			if message == "" {
+				message = "supervisor failed"
+			}
+			return fmt.Errorf("%s", message)
+		}
+		if data, err := os.ReadFile(readyPath); err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+			if parseErr == nil && pid > 0 {
+				if current, ok := runner.PID(cfg); ok && current == pid {
+					return nil
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("mihomo supervisor did not become ready")
+}
+
+func writeSupervisorError(readyPath string, err error) {
+	if readyPath == "" || err == nil {
+		return
+	}
+	message := runner.RedactLogText(err.Error())
+	if len(message) > 2048 {
+		message = message[:2048]
+	}
+	_ = os.MkdirAll(filepath.Dir(readyPath), 0755)
+	_ = os.WriteFile(readyPath+".error", []byte(message+"\n"), 0600)
+}
+
+func optionValue(args []string, name string) string {
+	short := "-" + name
+	long := "--" + name
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if arg == short || arg == long {
+			if index+1 < len(args) {
+				return args[index+1]
+			}
+			return ""
+		}
+		for _, prefix := range []string{short + "=", long + "="} {
+			if strings.HasPrefix(arg, prefix) {
+				return strings.TrimPrefix(arg, prefix)
+			}
+		}
+	}
+	return ""
 }
 
 func enterRuntimeDir(configPath string) error {

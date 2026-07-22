@@ -22,7 +22,25 @@ const (
 	minGeoIPSize  = 1024 * 1024
 )
 
+type launchedProcess struct {
+	pid  int
+	wait func() error
+}
+
+var (
+	mihomoLauncher    = launchMihomoProcess
+	startupProbeDelay = 1200 * time.Millisecond
+)
+
 func Start(cfg *config.Config, profile string) error {
+	return runManaged(cfg, profile, false, nil)
+}
+
+func Supervise(cfg *config.Config, profile string, ready func(int) error) error {
+	return runManaged(cfg, profile, true, ready)
+}
+
+func runManaged(cfg *config.Config, profile string, supervise bool, ready func(int) error) error {
 	if profile == "" {
 		return errors.New("profile path is required")
 	}
@@ -47,52 +65,67 @@ func Start(cfg *config.Config, profile string) error {
 	if err := ensureDashboard(cfg.Paths.Dashboard); err != nil {
 		return err
 	}
-	if err := os.MkdirAll("logs", 0755); err != nil {
-		return err
-	}
 	if err := os.MkdirAll("state", 0755); err != nil {
 		return err
 	}
-	out, err := os.OpenFile(filepath.Join("logs", "mihomo.out.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	out, err := newSanitizedRotatingLog(filepath.Join("logs", "mihomo.out.log"), mihomoLogPolicy)
 	if err != nil {
 		return err
 	}
-	errLog, err := os.OpenFile(filepath.Join("logs", "mihomo.err.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	errLog, err := newSanitizedRotatingLog(filepath.Join("logs", "mihomo.err.log"), mihomoLogPolicy)
 	if err != nil {
 		_ = out.Close()
 		return err
 	}
-	cmd := hiddenCommand(mihomo, "-d", ".", "-f", profile)
-	cmd.Stdout = out
-	cmd.Stderr = errLog
-	if err := cmd.Start(); err != nil {
+	process, err := mihomoLauncher(mihomo, profile, out, errLog)
+	if err != nil {
 		_ = out.Close()
 		_ = errLog.Close()
 		return err
 	}
-	if err := os.WriteFile(filepath.Join("state", "mihomo.pid"), []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0644); err != nil {
-		return err
+	if err := writePID(process.pid); err != nil {
+		_ = processOS.kill(process.pid)
+		_ = process.wait()
+		_ = out.Close()
+		_ = errLog.Close()
+		return fmt.Errorf("write mihomo PID: %w", err)
 	}
 	done := make(chan error, 1)
 	go func(pid int) {
-		err := cmd.Wait()
+		err := process.wait()
 		_ = out.Close()
 		_ = errLog.Close()
-		if current, readErr := readPID(); readErr == nil && current == pid {
-			_ = os.Remove(filepath.Join("state", "mihomo.pid"))
-		}
 		done <- err
-	}(cmd.Process.Pid)
+	}(process.pid)
 	select {
 	case err := <-done:
+		if current, readErr := readPID(); readErr == nil && current == process.pid {
+			_ = clearPID()
+		}
 		if err == nil {
 			err = errors.New("process exited")
 		}
 		return fmt.Errorf("mihomo exited immediately: %w%s", err, recentCoreLog())
-	case <-time.After(1200 * time.Millisecond):
+	case <-time.After(startupProbeDelay):
 	}
 	if err := postStartNetwork(cfg); err != nil {
 		appendRunnerLog("网络后处理失败: %v", err)
+	}
+	if ready != nil {
+		pid := process.pid
+		if current, ok := PID(cfg); ok {
+			pid = current
+		}
+		if err := ready(pid); err != nil {
+			_ = Stop(cfg)
+			return fmt.Errorf("report supervised start: %w", err)
+		}
+	}
+	if supervise {
+		<-done
+		if _, ok := PID(cfg); !ok {
+			_ = clearPID()
+		}
 	}
 	return nil
 }
@@ -118,7 +151,7 @@ func TestConfig(cfg *config.Config, profile string) error {
 	}
 	cmd := hiddenCommand(mihomo, "-t", "-d", ".", "-f", profile)
 	out, err := cmd.CombinedOutput()
-	text := strings.TrimSpace(string(out))
+	text := strings.TrimSpace(redactSensitiveText(string(out)))
 	if text != "" {
 		appendRunnerLog("配置测试: %s", text)
 	}
@@ -132,51 +165,78 @@ func TestConfig(cfg *config.Config, profile string) error {
 }
 
 func CleanupResidual(cfg *config.Config) error {
-	_ = Stop()
-	ports := mihomoPorts(cfg)
-	if err := stopMihomoOnPorts(ports); err != nil {
+	if err := Stop(cfg); err != nil {
 		return err
 	}
-	return waitPortsFree(ports, 5*time.Second)
-}
-
-func Stop() error {
-	pid, err := readPID()
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
+	if err := CleanupLogs(); err != nil {
+		appendRunnerLog("日志清理失败: %v", err)
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	if err := proc.Kill(); err != nil {
-		return err
-	}
-	_ = os.Remove(filepath.Join("state", "mihomo.pid"))
 	return nil
 }
 
-func IsRunning() bool {
-	pid, err := readPID()
-	if err != nil {
-		return false
+func Stop(cfg *config.Config) error {
+	if cfg == nil {
+		return errors.New("config is required")
 	}
-	if runtime.GOOS == "windows" {
-		cmd := hiddenCommand("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH")
-		out, err := cmd.Output()
-		return err == nil && strings.Contains(string(out), fmt.Sprintf(`"%d"`, pid))
+	ports := mihomoPorts(cfg)
+	deadline := time.Now().Add(stopProcessTimeout)
+	var lastKillErr error
+	var quietSince time.Time
+	for {
+		pids, err := managedPIDs(cfg)
+		if err != nil {
+			return fmt.Errorf("发现受管 mihomo 进程失败: %w", err)
+		}
+		for _, pid := range pids {
+			if err := processOS.kill(pid); err != nil {
+				lastKillErr = err
+			}
+		}
+		if len(pids) == 0 {
+			if err := waitPortsFree(ports, 0); err == nil {
+				if quietSince.IsZero() {
+					quietSince = time.Now()
+				}
+				if time.Since(quietSince) >= stopQuietPeriod {
+					_ = clearPID()
+					return nil
+				}
+			} else {
+				quietSince = time.Time{}
+			}
+		} else {
+			quietSince = time.Time{}
+		}
+		if time.Now().After(deadline) {
+			if len(pids) > 0 {
+				if lastKillErr != nil {
+					return lastKillErr
+				}
+				var values []string
+				for _, pid := range pids {
+					values = append(values, strconv.Itoa(pid))
+				}
+				return fmt.Errorf("mihomo 进程仍在运行: %s", strings.Join(values, ", "))
+			}
+			return waitPortsFree(ports, 0)
+		}
+		time.Sleep(stopPollInterval)
 	}
-	_, err = os.FindProcess(pid)
-	return err == nil
+}
+
+func Restart(cfg *config.Config, profile string) error {
+	return Start(cfg, profile)
+}
+
+func IsRunning(cfg *config.Config) bool {
+	_, ok := PID(cfg)
+	return ok
 }
 
 func Status(cfg *config.Config) string {
 	var b strings.Builder
 	b.WriteString("MeshMux 状态\n")
-	if pid, err := readPID(); err == nil {
+	if pid, ok := PID(cfg); ok {
 		fmt.Fprintf(&b, "mihomo PID: %d\n", pid)
 	} else {
 		b.WriteString("mihomo PID: 未运行\n")
@@ -191,9 +251,8 @@ func Status(cfg *config.Config) string {
 	return b.String()
 }
 
-func PID() (int, bool) {
-	pid, err := readPID()
-	return pid, err == nil && pid > 0
+func PID(cfg *config.Config) (int, bool) {
+	return findManagedPID(cfg)
 }
 
 func CanStartTUN() bool {
@@ -227,13 +286,13 @@ func controllerPing(cfg *config.Config) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf(resp.Status)
+		return errors.New(resp.Status)
 	}
 	return nil
 }
 
 func readPID() (int, error) {
-	data, err := os.ReadFile(filepath.Join("state", "mihomo.pid"))
+	data, err := os.ReadFile(pidFilePath)
 	if err != nil {
 		return 0, err
 	}
@@ -262,14 +321,11 @@ func recentCoreLog() string {
 }
 
 func recentLogText(path string) string {
-	data, err := os.ReadFile(path)
+	data, err := readFileTail(path, 2048)
 	if err != nil || len(data) == 0 {
 		return ""
 	}
-	if len(data) > 2048 {
-		data = data[len(data)-2048:]
-	}
-	text := strings.TrimSpace(string(data))
+	text := strings.TrimSpace(redactSensitiveText(string(data)))
 	if text == "" {
 		return ""
 	}
@@ -277,12 +333,13 @@ func recentLogText(path string) string {
 }
 
 func appendRunnerLog(format string, args ...any) {
+	runnerLogMu.Lock()
+	defer runnerLogMu.Unlock()
 	message := strings.TrimSpace(fmt.Sprintf(format, args...))
 	if message == "" {
 		return
 	}
-	_ = os.MkdirAll("logs", 0755)
-	file, err := os.OpenFile(filepath.Join("logs", "meshmux.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	file, err := newSanitizedRotatingLog(filepath.Join("logs", "meshmux.log"), runnerLogPolicy)
 	if err != nil {
 		return
 	}
@@ -410,14 +467,18 @@ func hiddenCommand(name string, args ...string) *exec.Cmd {
 	return cmd
 }
 
-func mihomoPorts(cfg *config.Config) []int {
-	ports := []int{cfg.Ports.Mixed}
-	if _, portText, ok := strings.Cut(cfg.Ports.Controller, ":"); ok {
-		if port, err := strconv.Atoi(portText); err == nil && port > 0 {
-			ports = append(ports, port)
-		}
+func launchMihomoProcess(mihomo, profile string, stdout, stderr io.Writer) (launchedProcess, error) {
+	cmd := hiddenCommand(mihomo, "-d", ".", "-f", profile)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return launchedProcess{}, err
 	}
-	return ports
+	return launchedProcess{pid: cmd.Process.Pid, wait: cmd.Wait}, nil
+}
+
+func mihomoPorts(cfg *config.Config) []int {
+	return discoveryPorts(cfg)
 }
 
 func waitPortsFree(ports []int, timeout time.Duration) error {

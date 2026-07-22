@@ -38,6 +38,8 @@ English README: [README.en.md](README.en.md)
 
 用户数据目录保存本地配置、生成的 profile、日志和 mihomo 状态。
 
+日志会自动按大小轮转。`mihomo.out.log` 和 `mihomo.err.log` 每个文件上限 8 MiB，最多保留 3 个备份；`meshmux.log` 上限 2 MiB，最多保留 2 个备份。启动核心前会清理超限的历史日志，写入日志时会隐藏 URL、密钥、令牌等敏感字段。
+
 ## 手机端
 
 Android 端使用 mobile profile 接入同一套配置。MeshMux 负责生成可导入的 mobile profile，并通过 Sub-Store 提供同步入口。

@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -85,7 +84,7 @@ func buildStatus(cfg *config.Config) statusPayload {
 	add := func(label, value, state, detail string) {
 		items = append(items, statusItem{Label: label, Value: value, State: state, Detail: detail})
 	}
-	if pid, ok := runner.PID(); ok && runner.IsRunning() {
+	if pid, ok := runner.PID(cfg); ok {
 		add("核心进程", "运行中", "ok", "PID "+strconv.Itoa(pid))
 	} else {
 		add("核心进程", "未运行", "warn", "")
@@ -168,12 +167,10 @@ func countProviderNodes(path string) int {
 	return count
 }
 
-var urlPattern = regexp.MustCompile(`https?://[^\s'"]+`)
-
 func recentStatusLogs() []string {
 	var lines []string
 	for _, path := range []string{filepath.Join("logs", "meshmux.log"), filepath.Join("logs", "mihomo.err.log"), filepath.Join("logs", "mihomo.out.log")} {
-		data, err := os.ReadFile(path)
+		data, err := readStatusLogTail(path, 64*1024)
 		if err != nil || len(data) == 0 {
 			continue
 		}
@@ -189,13 +186,38 @@ func recentStatusLogs() []string {
 			if isIgnorableStatusLog(line) {
 				continue
 			}
-			lines = append(lines, urlPattern.ReplaceAllString(line, "[url-hidden]"))
+			lines = append(lines, runner.RedactLogText(line))
 		}
 	}
 	if len(lines) == 0 {
 		return []string{"暂无错误或警告"}
 	}
 	return lines
+}
+
+func readStatusLogTail(path string, maxBytes int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() == 0 || maxBytes <= 0 {
+		return nil, nil
+	}
+	length := info.Size()
+	if length > maxBytes {
+		length = maxBytes
+	}
+	data := make([]byte, int(length))
+	n, err := file.ReadAt(data, info.Size()-length)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return data[:n], nil
 }
 
 func isIgnorableStatusLog(line string) bool {
@@ -389,7 +411,7 @@ func (s *Server) actionAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		message = "核心已启动"
 	case "stop":
-		if err := runner.Stop(); err != nil {
+		if err := runner.Stop(cfg); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

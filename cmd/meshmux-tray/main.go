@@ -84,16 +84,15 @@ func onReady() {
 			case <-mOpenDashboard.ClickedCh:
 				withConfig(func(cfg *config.Config) error { return runner.Dashboard(cfg) })
 			case <-mCore.ClickedCh:
-				if runner.IsRunning() {
-					notify("核心", runner.Stop())
-				} else {
-					start()
-				}
+				withConfig(func(cfg *config.Config) error {
+					if runner.IsRunning(cfg) {
+						return runner.Stop(cfg)
+					}
+					return startWithConfig(cfg)
+				})
 				refreshMenuState()
 			case <-mRestart.ClickedCh:
-				_ = runner.Stop()
-				time.Sleep(500 * time.Millisecond)
-				start()
+				restart()
 				refreshMenuState()
 			case <-mProxy.ClickedCh:
 				if runner.ProxyEnabled() {
@@ -142,13 +141,24 @@ func openConfig() {
 	notify("配置页面", runner.OpenURL(server.URL))
 }
 
-func start() {
+func startWithConfig(cfg *config.Config) error {
+	profile, err := generator.GenerateNamed(cfg, "windows")
+	if err != nil {
+		return err
+	}
+	if err := runner.Start(cfg, profile); err != nil {
+		return err
+	}
+	return runner.Proxy("on", cfg.Ports.Mixed)
+}
+
+func restart() {
 	withConfig(func(cfg *config.Config) error {
 		profile, err := generator.GenerateNamed(cfg, "windows")
 		if err != nil {
 			return err
 		}
-		if err := runner.Start(cfg, profile); err != nil {
+		if err := runner.Restart(cfg, profile); err != nil {
 			return err
 		}
 		return runner.Proxy("on", cfg.Ports.Mixed)
@@ -173,8 +183,12 @@ func notify(action string, err error) {
 }
 
 func refreshMenuState() {
+	running := false
+	if cfg, _, err := config.Load(cfgPath); err == nil {
+		running = runner.IsRunning(cfg)
+	}
 	if mCore != nil {
-		if runner.IsRunning() {
+		if running {
 			mCore.Check()
 			mCore.SetTitle("核心运行：开")
 		} else {

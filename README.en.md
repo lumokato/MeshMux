@@ -36,6 +36,8 @@ User data:
 
 The user data directory stores local config, generated profiles, logs, and mihomo state.
 
+Logs rotate automatically by size. `mihomo.out.log` and `mihomo.err.log` are limited to 8 MiB each with up to 3 backups; `meshmux.log` is limited to 2 MiB with up to 2 backups. Oversized legacy logs are cleaned before the core starts, and URLs, keys, tokens, and similar sensitive fields are redacted before log writes.
+
 ## License
 
 MeshMux is licensed under MIT. Bundled components are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
