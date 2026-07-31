@@ -6,7 +6,7 @@ on:
       version:
         description: "Release version"
         required: true
-        default: "0.2.0"
+        default: "0.2.1"
   push:
     tags:
       - "v*"
@@ -109,6 +109,7 @@ jobs:
             - 支持多条映射、配置校验、重载清理和停止时关闭全部 Tailnet 监听。
             - 默认关闭，不配置 `inboundForwards` 时保持原有行为。
             - 升级时安全同步安装包内置的补丁版 mihomo，同时保留显式自定义或已下载核心。
+            - 清理已废弃的旧核心来源兼容项；默认配置和 CI 均固定使用 MeshMux 仓库中的 `v1.19.29-meshmux.1` 资产。
 
             安装包内置 MeshMux 固定核心 `v1.19.29-meshmux.1`、geoip.metadb 和 MetaCubeXD。核心二进制与对应源码见 [固定核心资产](https://github.com/lumokato/MeshMux/releases/tag/mihomo-v1.19.29-meshmux.1)，第三方组件来源见 THIRD_PARTY_NOTICES.md。
           files: release/*.exe

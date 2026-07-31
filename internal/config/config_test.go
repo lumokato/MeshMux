@@ -106,8 +106,6 @@ func TestApplyDefaultsMigratesLegacyMihomoComponent(t *testing.T) {
 	for _, component := range []Component{
 		{Repo: "MetaCubeX/mihomo", AssetPattern: `mihomo-windows-amd64-compatible.*\.zip$`},
 		{Repo: "MetaCubeX/mihomo", AssetPattern: `mihomo-windows-amd64.*\.zip$`},
-		{Repo: "lumokato/mihomo", AssetPattern: `mihomo-windows-amd64-compatible-v1\.19\.26-meshmux\.1\.zip$`},
-		{Repo: "lumokato/MeshMux", AssetPattern: `mihomo-windows-amd64-compatible-v1\.19\.26-meshmux\.1\.zip$`},
 	} {
 		t.Run(component.Repo+"/"+component.AssetPattern, func(t *testing.T) {
 			cfg := Config{Components: Components{Mihomo: component}}

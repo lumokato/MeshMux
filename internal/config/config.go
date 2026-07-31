@@ -303,10 +303,6 @@ func legacyMihomoComponent(component Component) bool {
 		case "", `mihomo-windows-amd64-compatible.*\.zip$`, `mihomo-windows-amd64.*\.zip$`:
 			return true
 		}
-	case "lumokato/mihomo":
-		return component.AssetPattern == `mihomo-windows-amd64-compatible-v1\.19\.26-meshmux\.1\.zip$`
-	case "lumokato/MeshMux":
-		return component.AssetPattern == `mihomo-windows-amd64-compatible-v1\.19\.26-meshmux\.1\.zip$`
 	}
 	return false
 }
