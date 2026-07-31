@@ -17,7 +17,7 @@ import (
 	"github.com/meshmux/meshmux/internal/updater"
 )
 
-var version = "0.1.0"
+var version = "0.2.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -104,6 +104,9 @@ func run(args []string) error {
 			if err != nil {
 				return err
 			}
+			if err := runner.MarkMihomoDownloaded(cfg); err != nil {
+				return err
+			}
 			fmt.Println("installed mihomo:", path)
 		case "dashboard":
 			path, err := updater.Download(cfg.Components.Dashboard, "dashboard")
@@ -114,6 +117,9 @@ func run(args []string) error {
 		case "all":
 			path, err := updater.Download(cfg.Components.Mihomo, "mihomo")
 			if err != nil {
+				return err
+			}
+			if err := runner.MarkMihomoDownloaded(cfg); err != nil {
 				return err
 			}
 			fmt.Println("installed mihomo:", path)

@@ -202,22 +202,173 @@ func TestSuperviseStaysAliveUntilManagedProcessStops(t *testing.T) {
 	}
 }
 
+func TestPrepareMihomoSyncsBundledDefaultPath(t *testing.T) {
+	dir := useTempWorkingDir(t)
+	bundled := filepath.Join(dir, "bundled", "mihomo.exe")
+	if err := os.MkdirAll(filepath.Dir(bundled), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bundled, []byte("new-core"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(bundled, minMihomoSize); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join("bin", "mihomo.exe")
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("old-core"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(target, minMihomoSize); err != nil {
+		t.Fatal(err)
+	}
+	oldBundledMihomoPath := bundledMihomoPath
+	bundledMihomoPath = func() string { return bundled }
+	t.Cleanup(func() { bundledMihomoPath = oldBundledMihomoPath })
+
+	path, err := prepareMihomo(&config.Config{Components: config.Components{Mihomo: config.Component{Path: target}}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != target {
+		t.Fatalf("path = %q", path)
+	}
+	equal, err := sameFileContents(bundled, target)
+	if err != nil || !equal {
+		t.Fatalf("bundled core was not synchronized: equal=%v err=%v", equal, err)
+	}
+}
+
+func TestPrepareMihomoPreservesCustomPath(t *testing.T) {
+	dir := useTempWorkingDir(t)
+	bundled := filepath.Join(dir, "bundled", "mihomo.exe")
+	custom := filepath.Join(dir, "custom", "mihomo.exe")
+	for path, content := range map[string]string{bundled: "bundled-core", custom: "custom-core"} {
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(path, minMihomoSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldBundledMihomoPath := bundledMihomoPath
+	bundledMihomoPath = func() string { return bundled }
+	t.Cleanup(func() { bundledMihomoPath = oldBundledMihomoPath })
+
+	before, err := fileSHA256(custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := prepareMihomo(&config.Config{Components: config.Components{Mihomo: config.Component{Path: custom}}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := fileSHA256(custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != custom || before != after {
+		t.Fatalf("custom core changed: path=%q before=%x after=%x", path, before, after)
+	}
+}
+
+func TestPrepareMihomoUpgradesManagedBundle(t *testing.T) {
+	dir := useTempWorkingDir(t)
+	bundled := filepath.Join(dir, "bundled", "mihomo.exe")
+	if err := os.MkdirAll(filepath.Dir(bundled), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeCore := func(path, marker string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(marker), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(path, minMihomoSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCore(bundled, "bundle-one")
+	oldBundledMihomoPath := bundledMihomoPath
+	bundledMihomoPath = func() string { return bundled }
+	t.Cleanup(func() { bundledMihomoPath = oldBundledMihomoPath })
+	cfg := &config.Config{Components: config.Components{Mihomo: config.Component{Path: filepath.Join("bin", "mihomo.exe")}}}
+	cfg.ApplyDefaults()
+	if _, err := prepareMihomo(cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	writeCore(bundled, "bundle-two")
+	if _, err := prepareMihomo(cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	equal, err := sameFileContents(bundled, filepath.Join("bin", "mihomo.exe"))
+	if err != nil || !equal {
+		t.Fatalf("managed bundle was not upgraded: equal=%v err=%v", equal, err)
+	}
+}
+
+func TestPrepareMihomoPreservesDownloadedDefaultCore(t *testing.T) {
+	dir := useTempWorkingDir(t)
+	bundled := filepath.Join(dir, "bundled", "mihomo.exe")
+	target := filepath.Join("bin", "mihomo.exe")
+	for path, marker := range map[string]string{bundled: "bundle-core", target: "downloaded-core"} {
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(marker), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(path, minMihomoSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldBundledMihomoPath := bundledMihomoPath
+	bundledMihomoPath = func() string { return bundled }
+	t.Cleanup(func() { bundledMihomoPath = oldBundledMihomoPath })
+	cfg := &config.Config{Components: config.Components{Mihomo: config.Component{Path: target}}}
+	cfg.ApplyDefaults()
+	if err := MarkMihomoDownloaded(cfg); err != nil {
+		t.Fatal(err)
+	}
+	before, err := fileSHA256(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareMihomo(cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	after, err := fileSHA256(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("downloaded default core was overwritten: before=%x after=%x", before, after)
+	}
+}
+
 func restoreRunnerHooks(t *testing.T, fake *fakeProcessSystem) {
 	t.Helper()
 	oldProcessOS := processOS
 	oldLauncher := mihomoLauncher
+	oldBundledMihomoPath := bundledMihomoPath
 	oldStartupDelay := startupProbeDelay
 	oldStopTimeout := stopProcessTimeout
 	oldStopPoll := stopPollInterval
 	oldStopQuiet := stopQuietPeriod
 	processOS = fake
+	bundledMihomoPath = func() string { return "" }
 	startupProbeDelay = time.Millisecond
-	stopProcessTimeout = 25 * time.Millisecond
+	stopProcessTimeout = 100 * time.Millisecond
 	stopPollInterval = time.Millisecond
-	stopQuietPeriod = 3 * time.Millisecond
+	stopQuietPeriod = 5 * time.Millisecond
 	t.Cleanup(func() {
 		processOS = oldProcessOS
 		mihomoLauncher = oldLauncher
+		bundledMihomoPath = oldBundledMihomoPath
 		startupProbeDelay = oldStartupDelay
 		stopProcessTimeout = oldStopTimeout
 		stopPollInterval = oldStopPoll

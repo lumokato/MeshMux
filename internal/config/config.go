@@ -4,17 +4,22 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
 const (
-	AppName           = "MeshMux"
-	DefaultConfigPath = "meshmux.local.json"
-	ExampleConfigPath = "templates/meshmux.example.json"
+	AppName                   = "MeshMux"
+	DefaultConfigPath         = "meshmux.local.json"
+	ExampleConfigPath         = "templates/meshmux.example.json"
+	DefaultMihomoRepo         = "lumokato/MeshMux"
+	DefaultMihomoAssetPattern = `mihomo-windows-amd64-compatible-v1\.19\.26-meshmux\.1\.zip$`
 )
 
 type Config struct {
@@ -66,18 +71,26 @@ type WireGuard struct {
 }
 
 type Tailscale struct {
-	Enabled                bool     `json:"enabled"`
-	ControlURL             string   `json:"controlUrl"`
-	AuthKey                string   `json:"authKey"`
-	AuthKeyFile            string   `json:"authKeyFile"`
-	AcceptRoutes           bool     `json:"acceptRoutes"`
-	Ephemeral              bool     `json:"ephemeral"`
-	ExitNode               string   `json:"exitNode"`
-	ExitNodeAllowLANAccess bool     `json:"exitNodeAllowLanAccess"`
-	MagicDNSSuffix         string   `json:"magicDnsSuffix"`
-	Routes                 []string `json:"routes"`
-	IPv6Routes             []string `json:"ipv6Routes"`
-	Domains                []string `json:"domains"`
+	Enabled                bool             `json:"enabled"`
+	ControlURL             string           `json:"controlUrl"`
+	AuthKey                string           `json:"authKey"`
+	AuthKeyFile            string           `json:"authKeyFile"`
+	AcceptRoutes           bool             `json:"acceptRoutes"`
+	Ephemeral              bool             `json:"ephemeral"`
+	ExitNode               string           `json:"exitNode"`
+	ExitNodeAllowLANAccess bool             `json:"exitNodeAllowLanAccess"`
+	MagicDNSSuffix         string           `json:"magicDnsSuffix"`
+	Routes                 []string         `json:"routes"`
+	IPv6Routes             []string         `json:"ipv6Routes"`
+	Domains                []string         `json:"domains"`
+	InboundForwards        []InboundForward `json:"inboundForwards,omitempty"`
+}
+
+type InboundForward struct {
+	Name       string `json:"name"`
+	Network    string `json:"network"`
+	ListenPort int    `json:"listenPort"`
+	Target     string `json:"target"`
 }
 
 type TUN struct {
@@ -204,6 +217,9 @@ func Load(path string) (*Config, string, error) {
 		return nil, resolved, err
 	}
 	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, resolved, err
+	}
 	return &cfg, resolved, nil
 }
 
@@ -254,11 +270,11 @@ func (c *Config) ApplyDefaults() {
 	if c.Components.Mihomo.Path == "" {
 		c.Components.Mihomo.Path = filepath.Join("bin", "mihomo.exe")
 	}
-	if c.Components.Mihomo.Repo == "" {
-		c.Components.Mihomo.Repo = "MetaCubeX/mihomo"
-	}
-	if c.Components.Mihomo.AssetPattern == "" {
-		c.Components.Mihomo.AssetPattern = `mihomo-windows-amd64-compatible.*\.zip$`
+	if c.Components.Mihomo.Repo == "" || legacyMihomoComponent(c.Components.Mihomo) {
+		c.Components.Mihomo.Repo = DefaultMihomoRepo
+		c.Components.Mihomo.AssetPattern = DefaultMihomoAssetPattern
+	} else if c.Components.Mihomo.AssetPattern == "" {
+		c.Components.Mihomo.AssetPattern = DefaultMihomoAssetPattern
 	}
 	if c.Components.Dashboard.Path == "" {
 		c.Components.Dashboard.Path = "dashboard"
@@ -272,6 +288,59 @@ func (c *Config) ApplyDefaults() {
 	c.deriveSetup()
 	c.deriveTailnetDomains()
 	c.ApplySetup()
+}
+
+func legacyMihomoComponent(component Component) bool {
+	if component.Repo != "MetaCubeX/mihomo" {
+		return false
+	}
+	switch component.AssetPattern {
+	case "", `mihomo-windows-amd64-compatible.*\.zip$`, `mihomo-windows-amd64.*\.zip$`:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Config) Validate() error {
+	if len(c.Tailscale.InboundForwards) > 0 && !c.Tailscale.Enabled {
+		return errors.New("Tailnet 入站转发要求先启用 Tailscale")
+	}
+	names := make(map[string]struct{}, len(c.Tailscale.InboundForwards))
+	listeners := make(map[string]struct{}, len(c.Tailscale.InboundForwards))
+	for index := range c.Tailscale.InboundForwards {
+		forward := &c.Tailscale.InboundForwards[index]
+		forward.Name = strings.TrimSpace(forward.Name)
+		forward.Network = strings.ToLower(strings.TrimSpace(forward.Network))
+		forward.Target = strings.TrimSpace(forward.Target)
+		if forward.Name == "" {
+			return fmt.Errorf("Tailnet 入站转发第 %d 项缺少名称", index+1)
+		}
+		if _, exists := names[forward.Name]; exists {
+			return fmt.Errorf("Tailnet 入站转发名称重复: %s", forward.Name)
+		}
+		names[forward.Name] = struct{}{}
+		if forward.Network != "tcp" && forward.Network != "udp" {
+			return fmt.Errorf("Tailnet 入站转发 %s 的协议必须是 tcp 或 udp", forward.Name)
+		}
+		if forward.ListenPort < 1 || forward.ListenPort > 65535 {
+			return fmt.Errorf("Tailnet 入站转发 %s 的监听端口必须在 1-65535", forward.Name)
+		}
+		listenerKey := forward.Network + "/" + strconv.Itoa(forward.ListenPort)
+		if _, exists := listeners[listenerKey]; exists {
+			return fmt.Errorf("Tailnet 入站端口重复: %s", listenerKey)
+		}
+		listeners[listenerKey] = struct{}{}
+		host, port, err := net.SplitHostPort(forward.Target)
+		if err != nil || strings.TrimSpace(host) == "" {
+			return fmt.Errorf("Tailnet 入站转发 %s 的目标必须是 host:port", forward.Name)
+		}
+		portNumber, err := strconv.Atoi(port)
+		if err != nil || portNumber < 1 || portNumber > 65535 {
+			return fmt.Errorf("Tailnet 入站转发 %s 的目标端口必须在 1-65535", forward.Name)
+		}
+	}
+	return nil
 }
 
 func (c Config) StorageCopy() Config {

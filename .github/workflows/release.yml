@@ -6,7 +6,7 @@ on:
       version:
         description: "Release version"
         required: true
-        default: "0.1.1"
+        default: "0.2.0"
   push:
     tags:
       - "v*"
@@ -21,7 +21,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - name: Set up Go for mihomo
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+
+      - name: Build patched mihomo
+        shell: pwsh
+        run: |
+          .\scripts\build-mihomo.ps1 -OutputDir build\mihomo -PackageSource
+
+      - name: Set up Go for MeshMux
+        uses: actions/setup-go@v5
         with:
           go-version: "1.22.x"
 
@@ -52,11 +63,9 @@ jobs:
           $components = Join-Path $env:RUNNER_TEMP "meshmux-components"
           Remove-Item -LiteralPath $components -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path build\bin,$components | Out-Null
+          Copy-Item build\mihomo\mihomo-windows-amd64-compatible.exe build\bin\mihomo.exe -Force
 
           Push-Location $components
-          & "$repo\build\meshmux-cli.exe" download mihomo -config "$repo\templates\meshmux.example.json"
-          Copy-Item bin\mihomo.exe "$repo\build\bin\mihomo.exe" -Force
-
           $geoip = "downloads\geoip.metadb"
           Invoke-WebRequest `
             -Uri "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb" `
@@ -81,7 +90,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: MeshMux-Windows
-          path: release/*.exe
+          path: |
+            release/*.exe
+            build/mihomo/*.zip
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -91,5 +102,12 @@ jobs:
           body: |
             MeshMux ${{ env.MESHMUX_VERSION }} 正式版。
 
-            安装包内置 mihomo、geoip.metadb 和 MetaCubeXD。第三方组件来源见 THIRD_PARTY_NOTICES.md。
-          files: release/*.exe
+            - 为 `type: tailscale` 增加通用 Tailnet TCP/UDP 入站端口转发。
+            - 支持多条映射、配置校验、重载清理和停止时关闭全部 Tailnet 监听。
+            - 默认关闭，不配置 `inboundForwards` 时保持原有行为。
+            - 升级时安全同步安装包内置的补丁版 mihomo，同时保留显式自定义或已下载核心。
+
+            安装包内置 MeshMux 补丁版 mihomo、geoip.metadb 和 MetaCubeXD。mihomo 二进制与对应源码包随 Release 发布，第三方组件来源见 THIRD_PARTY_NOTICES.md。
+          files: |
+            release/*.exe
+            build/mihomo/*.zip

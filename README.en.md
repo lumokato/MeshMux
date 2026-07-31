@@ -7,6 +7,7 @@ MeshMux is a Windows tray tool for mihomo-based proxy, WireGuard, Tailscale, and
 - Tray control for starting, stopping, and restarting mihomo.
 - Windows system proxy and TUN mode support.
 - Browser setup page for subscription, Sub-Store, WireGuard, and Tailscale.
+- Tailnet-only TCP/UDP port forwarding to local Windows services.
 - Windows and mobile profile generation.
 - Mobile profile publishing through Sub-Store Files.
 - Installer bundle with `mihomo.exe`, `geoip.metadb`, and MetaCubeXD.
@@ -17,8 +18,15 @@ MeshMux is a Windows tray tool for mihomo-based proxy, WireGuard, Tailscale, and
 2. Open the setup page from the tray menu.
 3. Fill in the proxy subscription, Sub-Store URL, backend name, and file name.
 4. Import WireGuard configs or enable Tailscale when needed.
-5. Save the config and generate Windows/mobile profiles.
-6. Import the mobile profile link in an Android mihomo client.
+5. Add inbound mappings in the advanced page when Tailnet devices need to reach local services.
+6. Save the config and generate Windows/mobile profiles.
+7. Import the mobile profile link in an Android mihomo client.
+
+## Tailnet inbound forwarding
+
+MeshMux bundles a patched Mihomo core that listens only on the embedded tsnet node's Tailnet addresses and forwards configured TCP or UDP ports to local targets. Tailscale ACLs and Grants remain the access-control layer. The mappings are emitted only in the Windows profile; mobile profiles do not inherit them. With no mappings configured, existing outbound-only behavior is unchanged.
+
+See the Chinese README for the full JSON example and [third_party/mihomo/README.md](third_party/mihomo/README.md) for the pinned upstream commit, patch, reproducible build, and upgrade procedure.
 
 ## Paths
 

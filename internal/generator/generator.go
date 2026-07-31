@@ -223,6 +223,9 @@ func countProviderNodes(text string) int {
 }
 
 func Render(cfg *config.Config, target config.Target) (string, error) {
+	if err := cfg.Validate(); err != nil {
+		return "", err
+	}
 	var b strings.Builder
 	wgConfigs, err := loadWGConfigs(cfg.WireGuard.Configs)
 	if err != nil {
@@ -508,6 +511,15 @@ func renderTSProxy(b *strings.Builder, cfg *config.Config, target config.Target)
 		linef(b, "    exit-node: %s", quote(cfg.Tailscale.ExitNode))
 	}
 	linef(b, "    exit-node-allow-lan-access: %t", cfg.Tailscale.ExitNodeAllowLANAccess)
+	if !isMobileTarget(target) && len(cfg.Tailscale.InboundForwards) > 0 {
+		linef(b, "    inbound-forwards:")
+		for _, forward := range cfg.Tailscale.InboundForwards {
+			linef(b, "      - name: %s", quote(forward.Name))
+			linef(b, "        network: %s", forward.Network)
+			linef(b, "        listen-port: %d", forward.ListenPort)
+			linef(b, "        target: %s", quote(forward.Target))
+		}
+	}
 }
 
 func renderGroups(b *strings.Builder, providers, wgNames []string, tailscale bool) {

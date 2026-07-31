@@ -1,6 +1,9 @@
 package runner
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,9 +21,15 @@ import (
 )
 
 const (
-	minMihomoSize = 1024 * 1024
-	minGeoIPSize  = 1024 * 1024
+	minMihomoSize        = 1024 * 1024
+	minGeoIPSize         = 1024 * 1024
+	mihomoComponentState = "state/mihomo.component.json"
 )
+
+type mihomoComponentRecord struct {
+	Source string `json:"source"`
+	SHA256 string `json:"sha256"`
+}
 
 type launchedProcess struct {
 	pid  int
@@ -29,6 +38,7 @@ type launchedProcess struct {
 
 var (
 	mihomoLauncher    = launchMihomoProcess
+	bundledMihomoPath = config.BundledMihomoPath
 	startupProbeDelay = 1200 * time.Millisecond
 )
 
@@ -50,14 +60,9 @@ func runManaged(cfg *config.Config, profile string, supervise bool, ready func(i
 	if err := CleanupResidual(cfg); err != nil {
 		return err
 	}
-	mihomo := cfg.Components.Mihomo.Path
-	if mihomo == "" {
-		mihomo = filepath.Join("bin", "mihomo.exe")
-	}
-	if !fileLooksUsable(mihomo, minMihomoSize) {
-		if copyErr := copyBundledMihomo(mihomo); copyErr != nil {
-			return fmt.Errorf("mihomo not found at %s and bundled copy is unavailable: %w", mihomo, copyErr)
-		}
+	mihomo, err := prepareMihomo(cfg, true)
+	if err != nil {
+		return err
 	}
 	if err := ensureGeoIP(); err != nil {
 		return err
@@ -134,14 +139,9 @@ func TestConfig(cfg *config.Config, profile string) error {
 	if profile == "" {
 		return errors.New("profile path is required")
 	}
-	mihomo := cfg.Components.Mihomo.Path
-	if mihomo == "" {
-		mihomo = filepath.Join("bin", "mihomo.exe")
-	}
-	if !fileLooksUsable(mihomo, minMihomoSize) {
-		if copyErr := copyBundledMihomo(mihomo); copyErr != nil {
-			return fmt.Errorf("mihomo not found at %s and bundled copy is unavailable: %w", mihomo, copyErr)
-		}
+	mihomo, err := prepareMihomo(cfg, false)
+	if err != nil {
+		return err
 	}
 	if err := ensureGeoIP(); err != nil {
 		return err
@@ -208,17 +208,25 @@ func Stop(cfg *config.Config) error {
 			quietSince = time.Time{}
 		}
 		if time.Now().After(deadline) {
-			if len(pids) > 0 {
+			remaining, err := managedPIDs(cfg)
+			if err != nil {
+				return fmt.Errorf("确认受管 mihomo 进程停止失败: %w", err)
+			}
+			if len(remaining) > 0 {
 				if lastKillErr != nil {
 					return lastKillErr
 				}
 				var values []string
-				for _, pid := range pids {
+				for _, pid := range remaining {
 					values = append(values, strconv.Itoa(pid))
 				}
 				return fmt.Errorf("mihomo 进程仍在运行: %s", strings.Join(values, ", "))
 			}
-			return waitPortsFree(ports, 0)
+			if err := waitPortsFree(ports, 0); err != nil {
+				return err
+			}
+			_ = clearPID()
+			return nil
 		}
 		time.Sleep(stopPollInterval)
 	}
@@ -355,7 +363,174 @@ func appendRunnerLog(format string, args ...any) {
 }
 
 func copyBundledMihomo(target string) error {
-	return copyBundledFile(config.BundledMihomoPath(), target)
+	return copyBundledFile(bundledMihomoPath(), target)
+}
+
+func prepareMihomo(cfg *config.Config, syncBundled bool) (string, error) {
+	if cfg == nil {
+		return "", errors.New("config is required")
+	}
+	target := strings.TrimSpace(cfg.Components.Mihomo.Path)
+	if target == "" {
+		target = filepath.Join("bin", "mihomo.exe")
+	}
+	bundled := bundledMihomoPath()
+	if !syncBundled && shouldManageBundledMihomo(cfg, target) && fileLooksUsable(bundled, minMihomoSize) {
+		return bundled, nil
+	}
+	if syncBundled && shouldManageBundledMihomo(cfg, target) && fileLooksUsable(bundled, minMihomoSize) {
+		if err := syncBundledMihomo(bundled, target); err != nil {
+			return "", err
+		}
+	}
+	if !fileLooksUsable(target, minMihomoSize) {
+		if copyErr := copyBundledMihomo(target); copyErr != nil {
+			return "", fmt.Errorf("mihomo not found at %s and bundled copy is unavailable: %w", target, copyErr)
+		}
+	}
+	return target, nil
+}
+
+func shouldManageBundledMihomo(cfg *config.Config, target string) bool {
+	if !isDefaultMihomoPath(target) {
+		return false
+	}
+	component := cfg.Components.Mihomo
+	return (component.Repo == "" || component.Repo == config.DefaultMihomoRepo) &&
+		(component.AssetPattern == "" || component.AssetPattern == config.DefaultMihomoAssetPattern)
+}
+
+func syncBundledMihomo(bundled, target string) error {
+	bundledHash, err := fileSHA256(bundled)
+	if err != nil {
+		return fmt.Errorf("hash bundled mihomo: %w", err)
+	}
+	targetHash, targetErr := fileSHA256(target)
+	if targetErr == nil && bundledHash == targetHash {
+		return writeMihomoComponentRecord("bundle", targetHash)
+	}
+	if targetErr != nil && !os.IsNotExist(targetErr) {
+		return fmt.Errorf("hash current mihomo: %w", targetErr)
+	}
+	record, recordErr := readMihomoComponentRecord()
+	if recordErr == nil && targetErr == nil && strings.EqualFold(record.SHA256, hex.EncodeToString(targetHash[:])) {
+		if record.Source != "bundle" {
+			return nil
+		}
+	} else if recordErr == nil && targetErr == nil {
+		if err := writeMihomoComponentRecord("external", targetHash); err != nil {
+			return err
+		}
+		return nil
+	} else if recordErr != nil && !os.IsNotExist(recordErr) {
+		return fmt.Errorf("read mihomo component state: %w", recordErr)
+	}
+	if err := copyBundledFile(bundled, target); err != nil {
+		return fmt.Errorf("update bundled mihomo: %w", err)
+	}
+	if err := writeMihomoComponentRecord("bundle", bundledHash); err != nil {
+		return err
+	}
+	appendRunnerLog("已同步安装包内置 mihomo 到 %s", target)
+	return nil
+}
+
+func MarkMihomoDownloaded(cfg *config.Config) error {
+	if cfg == nil {
+		return errors.New("config is required")
+	}
+	target := strings.TrimSpace(cfg.Components.Mihomo.Path)
+	if target == "" {
+		target = filepath.Join("bin", "mihomo.exe")
+	}
+	if !isDefaultMihomoPath(target) {
+		return nil
+	}
+	hash, err := fileSHA256(target)
+	if err != nil {
+		return err
+	}
+	return writeMihomoComponentRecord("download", hash)
+}
+
+func readMihomoComponentRecord() (mihomoComponentRecord, error) {
+	data, err := os.ReadFile(mihomoComponentState)
+	if err != nil {
+		return mihomoComponentRecord{}, err
+	}
+	var record mihomoComponentRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return mihomoComponentRecord{}, err
+	}
+	return record, nil
+}
+
+func writeMihomoComponentRecord(source string, hash [sha256.Size]byte) error {
+	if err := os.MkdirAll(filepath.Dir(mihomoComponentState), 0755); err != nil {
+		return err
+	}
+	record := mihomoComponentRecord{Source: source, SHA256: hex.EncodeToString(hash[:])}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	tmp := mihomoComponentState + ".part"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0600); err != nil {
+		return err
+	}
+	if err := os.Remove(mihomoComponentState); err != nil && !os.IsNotExist(err) {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, mihomoComponentState)
+}
+
+func isDefaultMihomoPath(path string) bool {
+	defaultPath := filepath.Clean(filepath.Join("bin", "mihomo.exe"))
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(cleaned, defaultPath)
+	}
+	return cleaned == defaultPath
+}
+
+func sameFileContents(left, right string) (bool, error) {
+	leftInfo, err := os.Stat(left)
+	if err != nil {
+		return false, err
+	}
+	rightInfo, err := os.Stat(right)
+	if err != nil {
+		return false, err
+	}
+	if leftInfo.IsDir() || rightInfo.IsDir() || leftInfo.Size() != rightInfo.Size() {
+		return false, nil
+	}
+	leftHash, err := fileSHA256(left)
+	if err != nil {
+		return false, err
+	}
+	rightHash, err := fileSHA256(right)
+	if err != nil {
+		return false, err
+	}
+	return leftHash == rightHash, nil
+}
+
+func fileSHA256(path string) ([sha256.Size]byte, error) {
+	var zero [sha256.Size]byte
+	file, err := os.Open(path)
+	if err != nil {
+		return zero, err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return zero, err
+	}
+	var result [sha256.Size]byte
+	copy(result[:], hash.Sum(nil))
+	return result, nil
 }
 
 func ensureGeoIP() error {

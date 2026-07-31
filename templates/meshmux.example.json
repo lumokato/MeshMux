@@ -76,7 +76,8 @@
     "domains": [
       "*.i.example.com",
       "*.ts.net"
-    ]
+    ],
+    "inboundForwards": []
   },
   "rules": {
     "directCidrs": [

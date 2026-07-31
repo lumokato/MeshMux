@@ -1,0 +1,1019 @@
+diff --git a/adapter/outbound/tailscale.go b/adapter/outbound/tailscale.go
+index 0dabfd7f..7c752b65 100644
+--- a/adapter/outbound/tailscale.go
++++ b/adapter/outbound/tailscale.go
+@@ -45,23 +45,14 @@ type Tailscale struct {
+ 	backendInitErr  error
+ 
+ 	serverStarted bool
++	startCloseMu  sync.Mutex
++	closeOnce     sync.Once
++	closeErr      error
+ 
+-	unregisterDNSResolver func()
+-}
++	inboundForwardMu sync.Mutex
++	inboundForwards  *tailscaleInboundForwardSet
+ 
+-type TailscaleOption struct {
+-	BasicOption
+-	Name       string `proxy:"name"`
+-	Hostname   string `proxy:"hostname,omitempty"`
+-	AuthKey    string `proxy:"auth-key,omitempty"`
+-	ControlURL string `proxy:"control-url,omitempty"`
+-	StateDir   string `proxy:"state-dir,omitempty"`
+-	Ephemeral  bool   `proxy:"ephemeral,omitempty"`
+-	UDP        bool   `proxy:"udp,omitempty"`
+-
+-	AcceptRoutes           *bool  `proxy:"accept-routes,omitempty"`
+-	ExitNode               string `proxy:"exit-node,omitempty"`
+-	ExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`
++	unregisterDNSResolver func()
+ }
+ 
+ func init() {
+@@ -112,6 +103,11 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
+ 	if _, err := buildTailscaleMaskedPrefs(option); err != nil {
+ 		return nil, err
+ 	}
++	var err error
++	option.InboundForwards, err = normalizeTailscaleInboundForwards(option.InboundForwards)
++	if err != nil {
++		return nil, err
++	}
+ 	if option.StateDir == "" {
+ 		option.StateDir = "tailscale"
+ 	}
+@@ -181,6 +177,8 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
+ }
+ 
+ func (t *Tailscale) start() error {
++	t.startCloseMu.Lock()
++	defer t.startCloseMu.Unlock()
+ 	t.startOnce.Do(func() {
+ 		if err := t.server.Start(); err != nil {
+ 			t.startErr = err
+@@ -193,6 +191,10 @@ func (t *Tailscale) start() error {
+ 		if err := t.applyPrefs(ctx); err != nil {
+ 			t.startErr = err
+ 			t.setBackendInitialized(err)
++			if closeErr := t.server.Close(); closeErr != nil {
++				t.startErr = errors.Join(t.startErr, closeErr)
++			}
++			t.serverStarted = false
+ 			return
+ 		}
+ 		go t.watchBackendState()
+@@ -462,15 +464,27 @@ func (t *Tailscale) IsL3Protocol(metadata *C.Metadata) bool {
+ }
+ 
+ func (t *Tailscale) Close() error {
+-	t.cancel()
+-	if t.unregisterDNSResolver != nil {
+-		t.unregisterDNSResolver()
+-	}
+-	t.startOnce.Do(func() {
+-		t.startErr = errors.New("tailscale outbound closed")
++	t.closeOnce.Do(func() {
++		t.startCloseMu.Lock()
++		defer t.startCloseMu.Unlock()
++
++		t.inboundForwardMu.Lock()
++		inboundForwards := t.inboundForwards
++		t.inboundForwards = nil
++		t.inboundForwardMu.Unlock()
++		if inboundForwards != nil {
++			t.closeErr = inboundForwards.Close()
++		}
++		t.cancel()
++		if t.unregisterDNSResolver != nil {
++			t.unregisterDNSResolver()
++		}
++		t.startOnce.Do(func() {
++			t.startErr = errors.New("tailscale outbound closed")
++		})
++		if t.server != nil && t.serverStarted {
++			t.closeErr = errors.Join(t.closeErr, t.server.Close())
++		}
+ 	})
+-	if t.server != nil && t.serverStarted { // tsnet.Server.Close() must not be called before or concurrently with Start.
+-		return t.server.Close()
+-	}
+-	return nil
++	return t.closeErr
+ }
+diff --git a/adapter/outbound/tailscale_common.go b/adapter/outbound/tailscale_common.go
+new file mode 100644
+index 00000000..681c706b
+--- /dev/null
++++ b/adapter/outbound/tailscale_common.go
+@@ -0,0 +1,70 @@
++package outbound
++
++import (
++	"fmt"
++	"net"
++	"strconv"
++	"strings"
++)
++
++type TailscaleOption struct {
++	BasicOption
++	Name            string                    `proxy:"name"`
++	Hostname        string                    `proxy:"hostname,omitempty"`
++	AuthKey         string                    `proxy:"auth-key,omitempty"`
++	ControlURL      string                    `proxy:"control-url,omitempty"`
++	StateDir        string                    `proxy:"state-dir,omitempty"`
++	Ephemeral       bool                      `proxy:"ephemeral,omitempty"`
++	UDP             bool                      `proxy:"udp,omitempty"`
++	InboundForwards []TailscaleInboundForward `proxy:"inbound-forwards,omitempty"`
++
++	AcceptRoutes           *bool  `proxy:"accept-routes,omitempty"`
++	ExitNode               string `proxy:"exit-node,omitempty"`
++	ExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`
++}
++
++type TailscaleInboundForward struct {
++	Name       string `proxy:"name"`
++	Network    string `proxy:"network"`
++	ListenPort int    `proxy:"listen-port"`
++	Target     string `proxy:"target"`
++}
++
++func normalizeTailscaleInboundForwards(forwards []TailscaleInboundForward) ([]TailscaleInboundForward, error) {
++	normalized := make([]TailscaleInboundForward, len(forwards))
++	names := make(map[string]struct{}, len(forwards))
++	listeners := make(map[string]struct{}, len(forwards))
++	for index, forward := range forwards {
++		forward.Name = strings.TrimSpace(forward.Name)
++		forward.Network = strings.ToLower(strings.TrimSpace(forward.Network))
++		forward.Target = strings.TrimSpace(forward.Target)
++		if forward.Name == "" {
++			return nil, fmt.Errorf("inbound-forwards[%d]: name is required", index)
++		}
++		if _, exists := names[forward.Name]; exists {
++			return nil, fmt.Errorf("inbound-forwards[%d]: duplicate name %q", index, forward.Name)
++		}
++		names[forward.Name] = struct{}{}
++		if forward.Network != "tcp" && forward.Network != "udp" {
++			return nil, fmt.Errorf("inbound-forwards[%d] %q: network must be tcp or udp", index, forward.Name)
++		}
++		if forward.ListenPort < 1 || forward.ListenPort > 65535 {
++			return nil, fmt.Errorf("inbound-forwards[%d] %q: listen-port must be between 1 and 65535", index, forward.Name)
++		}
++		listenerKey := fmt.Sprintf("%s/%d", forward.Network, forward.ListenPort)
++		if _, exists := listeners[listenerKey]; exists {
++			return nil, fmt.Errorf("inbound-forwards[%d] %q: duplicate tailnet listener %s", index, forward.Name, listenerKey)
++		}
++		listeners[listenerKey] = struct{}{}
++		host, port, err := net.SplitHostPort(forward.Target)
++		if err != nil || strings.TrimSpace(host) == "" {
++			return nil, fmt.Errorf("inbound-forwards[%d] %q: target must be host:port", index, forward.Name)
++		}
++		portNumber, err := strconv.Atoi(port)
++		if err != nil || portNumber < 1 || portNumber > 65535 {
++			return nil, fmt.Errorf("inbound-forwards[%d] %q: target port must be between 1 and 65535", index, forward.Name)
++		}
++		normalized[index] = forward
++	}
++	return normalized, nil
++}
+diff --git a/adapter/outbound/tailscale_common_test.go b/adapter/outbound/tailscale_common_test.go
+new file mode 100644
+index 00000000..ccb3db0c
+--- /dev/null
++++ b/adapter/outbound/tailscale_common_test.go
+@@ -0,0 +1,44 @@
++package outbound
++
++import (
++	"strings"
++	"testing"
++)
++
++func TestNormalizeTailscaleInboundForwards(t *testing.T) {
++	forwards, err := normalizeTailscaleInboundForwards([]TailscaleInboundForward{
++		{Name: " ssh ", Network: "TCP", ListenPort: 22, Target: "127.0.0.1:22"},
++		{Name: "dns", Network: "udp", ListenPort: 5353, Target: "[::1]:5353"},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if forwards[0].Name != "ssh" || forwards[0].Network != "tcp" {
++		t.Fatalf("unexpected normalized forward: %+v", forwards[0])
++	}
++	if forwards[1].Target != "[::1]:5353" {
++		t.Fatalf("unexpected ipv6 target: %+v", forwards[1])
++	}
++}
++
++func TestNormalizeTailscaleInboundForwardsRejectsInvalidConfig(t *testing.T) {
++	testCases := []struct {
++		name     string
++		forwards []TailscaleInboundForward
++		want     string
++	}{
++		{name: "missing name", forwards: []TailscaleInboundForward{{Network: "tcp", ListenPort: 22, Target: "127.0.0.1:22"}}, want: "name is required"},
++		{name: "network", forwards: []TailscaleInboundForward{{Name: "x", Network: "icmp", ListenPort: 22, Target: "127.0.0.1:22"}}, want: "network must be tcp or udp"},
++		{name: "port", forwards: []TailscaleInboundForward{{Name: "x", Network: "tcp", ListenPort: 0, Target: "127.0.0.1:22"}}, want: "listen-port"},
++		{name: "target", forwards: []TailscaleInboundForward{{Name: "x", Network: "tcp", ListenPort: 22, Target: "127.0.0.1"}}, want: "target must be host:port"},
++		{name: "duplicate listener", forwards: []TailscaleInboundForward{{Name: "x", Network: "tcp", ListenPort: 22, Target: "127.0.0.1:22"}, {Name: "y", Network: "tcp", ListenPort: 22, Target: "127.0.0.1:23"}}, want: "duplicate tailnet listener"},
++	}
++	for _, testCase := range testCases {
++		t.Run(testCase.name, func(t *testing.T) {
++			_, err := normalizeTailscaleInboundForwards(testCase.forwards)
++			if err == nil || !strings.Contains(err.Error(), testCase.want) {
++				t.Fatalf("error = %v, want substring %q", err, testCase.want)
++			}
++		})
++	}
++}
+diff --git a/adapter/outbound/tailscale_forward.go b/adapter/outbound/tailscale_forward.go
+new file mode 100644
+index 00000000..8135d2ee
+--- /dev/null
++++ b/adapter/outbound/tailscale_forward.go
+@@ -0,0 +1,470 @@
++//go:build with_gvisor && !no_tailscale
++
++package outbound
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"net/netip"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	N "github.com/metacubex/mihomo/common/net"
++	C "github.com/metacubex/mihomo/constant"
++	"github.com/metacubex/mihomo/log"
++)
++
++const defaultTailscaleUDPForwardTimeout = 5 * time.Minute
++
++type tailscaleForwardServer interface {
++	Listen(network, address string) (net.Listener, error)
++	ListenPacket(network, address string) (net.PacketConn, error)
++	TailscaleIPs() (netip.Addr, netip.Addr)
++}
++
++type tailscaleInboundForwardSet struct {
++	proxyName  string
++	ctx        context.Context
++	cancel     context.CancelFunc
++	udpTimeout time.Duration
++	closeOnce  sync.Once
++	closeErr   error
++	wg         sync.WaitGroup
++
++	mu          sync.Mutex
++	closed      bool
++	closers     []io.Closer
++	connections map[net.Conn]struct{}
++	udpSessions map[string]*tailscaleUDPForwardSession
++}
++
++type tailscaleUDPForwardSession struct {
++	key        string
++	forward    TailscaleInboundForward
++	packetConn net.PacketConn
++	remote     net.Addr
++	target     net.Conn
++	lastSeen   atomic.Int64
++	closeOnce  sync.Once
++}
++
++func (t *Tailscale) startInboundForwards() error {
++	if len(t.option.InboundForwards) == 0 {
++		return nil
++	}
++	ctx, cancel := context.WithTimeout(t.ctx, 30*time.Second)
++	defer cancel()
++	if err := t.ensureStarted(ctx); err != nil {
++		return fmt.Errorf("start tailscale server: %w", err)
++	}
++
++	t.startCloseMu.Lock()
++	defer t.startCloseMu.Unlock()
++	if t.ctx.Err() != nil {
++		return t.ctx.Err()
++	}
++	t.inboundForwardMu.Lock()
++	if t.inboundForwards != nil {
++		t.inboundForwardMu.Unlock()
++		return nil
++	}
++	t.inboundForwardMu.Unlock()
++	if err := waitTailscaleIPs(ctx, t.server); err != nil {
++		return err
++	}
++	forwardSet, err := startTailscaleInboundForwardSet(t.ctx, t.Name(), t.server, t.option.InboundForwards, defaultTailscaleUDPForwardTimeout)
++	if err != nil {
++		return err
++	}
++	t.inboundForwardMu.Lock()
++	defer t.inboundForwardMu.Unlock()
++	if t.inboundForwards != nil {
++		_ = forwardSet.Close()
++		return nil
++	}
++	t.inboundForwards = forwardSet
++	return nil
++}
++
++func waitTailscaleIPs(ctx context.Context, server tailscaleForwardServer) error {
++	ticker := time.NewTicker(100 * time.Millisecond)
++	defer ticker.Stop()
++	for {
++		v4, v6 := server.TailscaleIPs()
++		if v4.IsValid() || v6.IsValid() {
++			return nil
++		}
++		select {
++		case <-ctx.Done():
++			return fmt.Errorf("wait for tailscale addresses: %w", ctx.Err())
++		case <-ticker.C:
++		}
++	}
++}
++
++func startTailscaleInboundForwardSet(parent context.Context, proxyName string, server tailscaleForwardServer, forwards []TailscaleInboundForward, udpTimeout time.Duration) (*tailscaleInboundForwardSet, error) {
++	ctx, cancel := context.WithCancel(parent)
++	set := &tailscaleInboundForwardSet{
++		proxyName:   proxyName,
++		ctx:         ctx,
++		cancel:      cancel,
++		udpTimeout:  udpTimeout,
++		connections: make(map[net.Conn]struct{}),
++		udpSessions: make(map[string]*tailscaleUDPForwardSession),
++	}
++	hasUDP := false
++	for _, forward := range forwards {
++		switch forward.Network {
++		case "tcp":
++			listener, err := server.Listen("tcp", fmt.Sprintf(":%d", forward.ListenPort))
++			if err != nil {
++				_ = set.Close()
++				return nil, fmt.Errorf("inbound forward %q listen on tailnet tcp/%d: %w", forward.Name, forward.ListenPort, err)
++			}
++			set.addCloser(listener)
++			set.wg.Add(1)
++			go set.acceptTCP(forward, listener)
++		case "udp":
++			packetConns, err := listenTailscaleUDP(server, forward.ListenPort)
++			if err != nil {
++				_ = set.Close()
++				return nil, fmt.Errorf("inbound forward %q listen on tailnet udp/%d: %w", forward.Name, forward.ListenPort, err)
++			}
++			for _, packetConn := range packetConns {
++				set.addCloser(packetConn)
++				set.wg.Add(1)
++				go set.readUDP(forward, packetConn)
++			}
++			hasUDP = true
++		}
++		log.Infoln("[Tailscale](%s) inbound forward [%s] listening on tailnet %s/%d -> %s", proxyName, forward.Name, forward.Network, forward.ListenPort, forward.Target)
++	}
++	if hasUDP {
++		set.wg.Add(1)
++		go set.expireUDPSessions()
++	}
++	return set, nil
++}
++
++func listenTailscaleUDP(server tailscaleForwardServer, port int) ([]net.PacketConn, error) {
++	v4, v6 := server.TailscaleIPs()
++	addresses := make([]netip.Addr, 0, 2)
++	if v4.IsValid() {
++		addresses = append(addresses, v4)
++	}
++	if v6.IsValid() {
++		addresses = append(addresses, v6)
++	}
++	if len(addresses) == 0 {
++		return nil, errors.New("tailscale node has no assigned addresses")
++	}
++	packetConns := make([]net.PacketConn, 0, len(addresses))
++	for _, address := range addresses {
++		network := "udp4"
++		if address.Is6() {
++			network = "udp6"
++		}
++		packetConn, err := server.ListenPacket(network, netip.AddrPortFrom(address, uint16(port)).String())
++		if err != nil {
++			for _, opened := range packetConns {
++				_ = opened.Close()
++			}
++			return nil, err
++		}
++		packetConns = append(packetConns, packetConn)
++	}
++	return packetConns, nil
++}
++
++func (s *tailscaleInboundForwardSet) addCloser(closer io.Closer) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.closers = append(s.closers, closer)
++}
++
++func (s *tailscaleInboundForwardSet) acceptTCP(forward TailscaleInboundForward, listener net.Listener) {
++	defer s.wg.Done()
++	for {
++		connection, err := listener.Accept()
++		if err != nil {
++			if s.ctx.Err() == nil && !errors.Is(err, net.ErrClosed) {
++				log.Errorln("[Tailscale](%s) inbound forward [%s] accept failed: %v", s.proxyName, forward.Name, err)
++			}
++			return
++		}
++		if !s.startTCPConnection(connection) {
++			continue
++		}
++		go s.forwardTCP(forward, connection)
++	}
++}
++
++func (s *tailscaleInboundForwardSet) forwardTCP(forward TailscaleInboundForward, source net.Conn) {
++	defer s.wg.Done()
++	defer s.untrackConnection(source)
++	dialer := net.Dialer{Timeout: C.DefaultTCPTimeout}
++	target, err := dialer.DialContext(s.ctx, "tcp", forward.Target)
++	if err != nil {
++		if s.ctx.Err() == nil {
++			log.Warnln("[Tailscale](%s) inbound forward [%s] target %s rejected connection from %s: %v", s.proxyName, forward.Name, forward.Target, source.RemoteAddr(), err)
++		}
++		return
++	}
++	if !s.trackConnection(target) {
++		return
++	}
++	defer s.untrackConnection(target)
++	log.Debugln("[Tailscale](%s) inbound forward [%s] connected %s -> %s", s.proxyName, forward.Name, source.RemoteAddr(), forward.Target)
++	N.Relay(source, target)
++	log.Debugln("[Tailscale](%s) inbound forward [%s] closed %s -> %s", s.proxyName, forward.Name, source.RemoteAddr(), forward.Target)
++}
++
++func (s *tailscaleInboundForwardSet) startTCPConnection(connection net.Conn) bool {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.closed {
++		_ = connection.Close()
++		return false
++	}
++	s.connections[connection] = struct{}{}
++	s.wg.Add(1)
++	return true
++}
++
++func (s *tailscaleInboundForwardSet) trackConnection(connection net.Conn) bool {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.closed {
++		_ = connection.Close()
++		return false
++	}
++	s.connections[connection] = struct{}{}
++	return true
++}
++
++func (s *tailscaleInboundForwardSet) untrackConnection(connection net.Conn) {
++	s.mu.Lock()
++	delete(s.connections, connection)
++	s.mu.Unlock()
++	_ = connection.Close()
++}
++
++func (s *tailscaleInboundForwardSet) readUDP(forward TailscaleInboundForward, packetConn net.PacketConn) {
++	defer s.wg.Done()
++	buffer := make([]byte, 64*1024)
++	for {
++		count, remote, err := packetConn.ReadFrom(buffer)
++		if err != nil {
++			if s.ctx.Err() == nil && !errors.Is(err, net.ErrClosed) {
++				log.Errorln("[Tailscale](%s) inbound forward [%s] read udp failed: %v", s.proxyName, forward.Name, err)
++			}
++			return
++		}
++		session, err := s.getOrCreateUDPSession(forward, packetConn, remote)
++		if err != nil {
++			if s.ctx.Err() == nil {
++				log.Warnln("[Tailscale](%s) inbound forward [%s] target %s rejected udp from %s: %v", s.proxyName, forward.Name, forward.Target, remote, err)
++			}
++			continue
++		}
++		session.lastSeen.Store(time.Now().UnixNano())
++		if _, err = session.target.Write(buffer[:count]); err != nil {
++			log.Warnln("[Tailscale](%s) inbound forward [%s] write udp to target %s failed: %v", s.proxyName, forward.Name, forward.Target, err)
++			s.removeUDPSession(session)
++		}
++	}
++}
++
++func (s *tailscaleInboundForwardSet) getOrCreateUDPSession(forward TailscaleInboundForward, packetConn net.PacketConn, remote net.Addr) (*tailscaleUDPForwardSession, error) {
++	key := forward.Name + "\x00" + packetConn.LocalAddr().String() + "\x00" + remote.String()
++	s.mu.Lock()
++	if session := s.udpSessions[key]; session != nil {
++		s.mu.Unlock()
++		return session, nil
++	}
++	if s.closed {
++		s.mu.Unlock()
++		return nil, net.ErrClosed
++	}
++	s.mu.Unlock()
++
++	dialer := net.Dialer{Timeout: C.DefaultUDPTimeout}
++	target, err := dialer.DialContext(s.ctx, "udp", forward.Target)
++	if err != nil {
++		return nil, err
++	}
++	session := &tailscaleUDPForwardSession{
++		key:        key,
++		forward:    forward,
++		packetConn: packetConn,
++		remote:     cloneUDPAddr(remote),
++		target:     target,
++	}
++	session.lastSeen.Store(time.Now().UnixNano())
++
++	s.mu.Lock()
++	if existing := s.udpSessions[key]; existing != nil {
++		s.mu.Unlock()
++		_ = target.Close()
++		return existing, nil
++	}
++	if s.closed {
++		s.mu.Unlock()
++		_ = target.Close()
++		return nil, net.ErrClosed
++	}
++	s.udpSessions[key] = session
++	s.wg.Add(1)
++	s.mu.Unlock()
++
++	go s.readUDPResponses(session)
++	return session, nil
++}
++
++func cloneUDPAddr(address net.Addr) net.Addr {
++	if udpAddress, ok := address.(*net.UDPAddr); ok {
++		clone := *udpAddress
++		clone.IP = append(net.IP(nil), udpAddress.IP...)
++		return &clone
++	}
++	return address
++}
++
++func (s *tailscaleInboundForwardSet) readUDPResponses(session *tailscaleUDPForwardSession) {
++	defer s.wg.Done()
++	defer s.removeUDPSession(session)
++	buffer := make([]byte, 64*1024)
++	for {
++		count, err := session.target.Read(buffer)
++		if err != nil {
++			if s.ctx.Err() == nil && !errors.Is(err, net.ErrClosed) {
++				log.Debugln("[Tailscale](%s) inbound forward [%s] udp session %s closed: %v", s.proxyName, session.forward.Name, session.remote, err)
++			}
++			return
++		}
++		session.lastSeen.Store(time.Now().UnixNano())
++		if _, err = session.packetConn.WriteTo(buffer[:count], session.remote); err != nil {
++			if s.ctx.Err() == nil && !errors.Is(err, net.ErrClosed) {
++				log.Warnln("[Tailscale](%s) inbound forward [%s] write udp response to %s failed: %v", s.proxyName, session.forward.Name, session.remote, err)
++			}
++			return
++		}
++	}
++}
++
++func (s *tailscaleInboundForwardSet) expireUDPSessions() {
++	defer s.wg.Done()
++	interval := s.udpTimeout / 2
++	if interval < 100*time.Millisecond {
++		interval = 100 * time.Millisecond
++	}
++	ticker := time.NewTicker(interval)
++	defer ticker.Stop()
++	for {
++		select {
++		case <-s.ctx.Done():
++			return
++		case now := <-ticker.C:
++			var expired []*tailscaleUDPForwardSession
++			s.mu.Lock()
++			for _, session := range s.udpSessions {
++				lastSeen := time.Unix(0, session.lastSeen.Load())
++				if now.Sub(lastSeen) >= s.udpTimeout {
++					expired = append(expired, session)
++				}
++			}
++			s.mu.Unlock()
++			for _, session := range expired {
++				s.removeUDPSession(session)
++			}
++		}
++	}
++}
++
++func (s *tailscaleInboundForwardSet) removeUDPSession(session *tailscaleUDPForwardSession) {
++	s.mu.Lock()
++	if s.udpSessions[session.key] == session {
++		delete(s.udpSessions, session.key)
++	}
++	s.mu.Unlock()
++	session.closeOnce.Do(func() {
++		_ = session.target.Close()
++	})
++}
++
++func (s *tailscaleInboundForwardSet) Close() error {
++	s.closeOnce.Do(func() {
++		s.cancel()
++		s.mu.Lock()
++		s.closed = true
++		closers := append([]io.Closer(nil), s.closers...)
++		connections := make([]net.Conn, 0, len(s.connections))
++		for connection := range s.connections {
++			connections = append(connections, connection)
++		}
++		sessions := make([]*tailscaleUDPForwardSession, 0, len(s.udpSessions))
++		for _, session := range s.udpSessions {
++			sessions = append(sessions, session)
++		}
++		s.mu.Unlock()
++		for _, closer := range closers {
++			if err := closer.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
++				s.closeErr = errors.Join(s.closeErr, err)
++			}
++		}
++		for _, connection := range connections {
++			_ = connection.Close()
++		}
++		for _, session := range sessions {
++			s.removeUDPSession(session)
++		}
++		s.wg.Wait()
++	})
++	return s.closeErr
++}
++
++func HasInboundForwards(proxy C.ProxyAdapter) bool {
++	switch typed := proxy.(type) {
++	case *autoCloseProxyAdapter:
++		return HasInboundForwards(typed.ProxyAdapter)
++	case *SingMux:
++		return HasInboundForwards(typed.ProxyAdapter)
++	case *Tailscale:
++		return len(typed.option.InboundForwards) > 0
++	default:
++		return false
++	}
++}
++
++func TailscaleStateDir(proxy C.ProxyAdapter) (string, bool) {
++	switch typed := proxy.(type) {
++	case *autoCloseProxyAdapter:
++		return TailscaleStateDir(typed.ProxyAdapter)
++	case *SingMux:
++		return TailscaleStateDir(typed.ProxyAdapter)
++	case *Tailscale:
++		return typed.option.StateDir, true
++	default:
++		return "", false
++	}
++}
++
++func StartInboundForwards(proxy C.ProxyAdapter) (bool, error) {
++	switch typed := proxy.(type) {
++	case *autoCloseProxyAdapter:
++		return StartInboundForwards(typed.ProxyAdapter)
++	case *SingMux:
++		return StartInboundForwards(typed.ProxyAdapter)
++	case *Tailscale:
++		if len(typed.option.InboundForwards) == 0 {
++			return false, nil
++		}
++		return true, typed.startInboundForwards()
++	default:
++		return false, nil
++	}
++}
+diff --git a/adapter/outbound/tailscale_forward_stub.go b/adapter/outbound/tailscale_forward_stub.go
+new file mode 100644
+index 00000000..10fe6066
+--- /dev/null
++++ b/adapter/outbound/tailscale_forward_stub.go
+@@ -0,0 +1,17 @@
++//go:build !with_gvisor || no_tailscale
++
++package outbound
++
++import C "github.com/metacubex/mihomo/constant"
++
++func HasInboundForwards(proxy C.ProxyAdapter) bool {
++	return false
++}
++
++func TailscaleStateDir(proxy C.ProxyAdapter) (string, bool) {
++	return "", false
++}
++
++func StartInboundForwards(proxy C.ProxyAdapter) (bool, error) {
++	return false, nil
++}
+diff --git a/adapter/outbound/tailscale_forward_test.go b/adapter/outbound/tailscale_forward_test.go
+new file mode 100644
+index 00000000..aa8420d1
+--- /dev/null
++++ b/adapter/outbound/tailscale_forward_test.go
+@@ -0,0 +1,146 @@
++//go:build with_gvisor && !no_tailscale
++
++package outbound
++
++import (
++	"context"
++	"io"
++	"net"
++	"net/netip"
++	"testing"
++	"time"
++)
++
++type fakeTailscaleForwardServer struct {
++	tcpListeners []net.Listener
++	packetConns  []net.PacketConn
++}
++
++func (s *fakeTailscaleForwardServer) Listen(network, address string) (net.Listener, error) {
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err == nil {
++		s.tcpListeners = append(s.tcpListeners, listener)
++	}
++	return listener, err
++}
++
++func (s *fakeTailscaleForwardServer) ListenPacket(network, address string) (net.PacketConn, error) {
++	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err == nil {
++		s.packetConns = append(s.packetConns, packetConn)
++	}
++	return packetConn, err
++}
++
++func (s *fakeTailscaleForwardServer) TailscaleIPs() (netip.Addr, netip.Addr) {
++	return netip.MustParseAddr("100.64.0.1"), netip.Addr{}
++}
++
++func TestTailscaleInboundTCPForwardBidirectionalAndClose(t *testing.T) {
++	targetListener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer targetListener.Close()
++	go func() {
++		connection, acceptErr := targetListener.Accept()
++		if acceptErr != nil {
++			return
++		}
++		defer connection.Close()
++		_, _ = io.Copy(connection, connection)
++	}()
++
++	server := &fakeTailscaleForwardServer{}
++	forwardSet, err := startTailscaleInboundForwardSet(context.Background(), "test", server, []TailscaleInboundForward{{
++		Name:       "echo",
++		Network:    "tcp",
++		ListenPort: 12345,
++		Target:     targetListener.Addr().String(),
++	}}, time.Second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	client, err := net.Dial("tcp", server.tcpListeners[0].Addr().String())
++	if err != nil {
++		t.Fatal(err)
++	}
++	message := []byte("tailnet-forward")
++	if _, err = client.Write(message); err != nil {
++		t.Fatal(err)
++	}
++	response := make([]byte, len(message))
++	if _, err = io.ReadFull(client, response); err != nil {
++		t.Fatal(err)
++	}
++	if string(response) != string(message) {
++		t.Fatalf("response = %q", response)
++	}
++	if err = forwardSet.Close(); err != nil {
++		t.Fatal(err)
++	}
++	_ = client.SetReadDeadline(time.Now().Add(time.Second))
++	if _, err = client.Read(make([]byte, 1)); err == nil {
++		t.Fatal("active forwarded connection remained open after close")
++	}
++	if _, err = net.DialTimeout("tcp", server.tcpListeners[0].Addr().String(), 200*time.Millisecond); err == nil {
++		t.Fatal("tailnet listener remained open after close")
++	}
++}
++
++func TestTailscaleInboundUDPForward(t *testing.T) {
++	target, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer target.Close()
++	go func() {
++		buffer := make([]byte, 1024)
++		count, remote, readErr := target.ReadFrom(buffer)
++		if readErr == nil {
++			_, _ = target.WriteTo(buffer[:count], remote)
++		}
++	}()
++
++	server := &fakeTailscaleForwardServer{}
++	forwardSet, err := startTailscaleInboundForwardSet(context.Background(), "test", server, []TailscaleInboundForward{{
++		Name:       "echo-udp",
++		Network:    "udp",
++		ListenPort: 12345,
++		Target:     target.LocalAddr().String(),
++	}}, time.Second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer forwardSet.Close()
++	client, err := net.Dial("udp", server.packetConns[0].LocalAddr().String())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer client.Close()
++	_ = client.SetDeadline(time.Now().Add(2 * time.Second))
++	message := []byte("tailnet-udp")
++	if _, err = client.Write(message); err != nil {
++		t.Fatal(err)
++	}
++	response := make([]byte, len(message))
++	if _, err = io.ReadFull(client, response); err != nil {
++		t.Fatal(err)
++	}
++	if string(response) != string(message) {
++		t.Fatalf("response = %q", response)
++	}
++}
++
++func TestTailscaleStateDirUnwrapsAdapters(t *testing.T) {
++	tailscale, err := NewTailscale(TailscaleOption{Name: "test", StateDir: "tailscale-state-dir-test"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer tailscale.Close()
++	wrapped := NewAutoCloseProxyAdapter(tailscale)
++	stateDir, ok := TailscaleStateDir(wrapped)
++	if !ok || stateDir != tailscale.option.StateDir {
++		t.Fatalf("state dir = %q, %v", stateDir, ok)
++	}
++}
+diff --git a/adapter/outbound/tailscale_stub.go b/adapter/outbound/tailscale_stub.go
+index 6ef171c0..108bd16f 100644
+--- a/adapter/outbound/tailscale_stub.go
++++ b/adapter/outbound/tailscale_stub.go
+@@ -8,21 +8,9 @@ type Tailscale struct {
+ 	*Base
+ }
+ 
+-type TailscaleOption struct {
+-	BasicOption
+-	Name       string `proxy:"name"`
+-	Hostname   string `proxy:"hostname,omitempty"`
+-	AuthKey    string `proxy:"auth-key,omitempty"`
+-	ControlURL string `proxy:"control-url,omitempty"`
+-	StateDir   string `proxy:"state-dir,omitempty"`
+-	Ephemeral  bool   `proxy:"ephemeral,omitempty"`
+-	UDP        bool   `proxy:"udp,omitempty"`
+-
+-	AcceptRoutes           *bool  `proxy:"accept-routes,omitempty"`
+-	ExitNode               string `proxy:"exit-node,omitempty"`
+-	ExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`
+-}
+-
+ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
++	if _, err := normalizeTailscaleInboundForwards(option.InboundForwards); err != nil {
++		return nil, err
++	}
+ 	return nil, fmt.Errorf("tailscale support is disabled by \"no_tailscale\" build tag or not include \"with_gvisor\" build tag")
+ }
+diff --git a/config/tailscale_test.go b/config/tailscale_test.go
+new file mode 100644
+index 00000000..35ad4965
+--- /dev/null
++++ b/config/tailscale_test.go
+@@ -0,0 +1,37 @@
++//go:build with_gvisor && !no_tailscale
++
++package config
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestParseTailscaleInboundForwards(t *testing.T) {
++	config := RawConfig{Proxy: []map[string]any{{
++		"name":     "tailnet",
++		"type":     "tailscale",
++		"hostname": "test-node",
++		"inbound-forwards": []any{
++			map[string]any{"name": "ssh", "network": "tcp", "listen-port": 22, "target": "127.0.0.1:22"},
++			map[string]any{"name": "udp", "network": "udp", "listen-port": 12345, "target": "127.0.0.1:12345"},
++		},
++	}}}
++	proxies, _, err := parseProxies(&config)
++	require.NoError(t, err)
++	require.Contains(t, proxies, "tailnet")
++	require.NoError(t, proxies["tailnet"].Close())
++}
++
++func TestParseTailscaleInboundForwardsRejectsInvalidTarget(t *testing.T) {
++	config := RawConfig{Proxy: []map[string]any{{
++		"name": "tailnet",
++		"type": "tailscale",
++		"inbound-forwards": []any{
++			map[string]any{"name": "ssh", "network": "tcp", "listen-port": 22, "target": "invalid"},
++		},
++	}}}
++	_, _, err := parseProxies(&config)
++	require.ErrorContains(t, err, "target must be host:port")
++}
+diff --git a/docs/config.yaml b/docs/config.yaml
+index cd14f17f..12172ba5 100644
+--- a/docs/config.yaml
++++ b/docs/config.yaml
+@@ -1157,6 +1157,15 @@ proxies: # socks5
+     # accept-routes: true # 是否接受 Tailnet 中发布的 subnet routes
+     # exit-node: 100.64.0.1 # 使用指定 exit node，可填写节点 IP；也支持 auto:any
+     # exit-node-allow-lan-access: true # 使用 exit node 时是否允许访问本地 LAN
++    # inbound-forwards: # 可选；仅在此 tsnet 节点的 Tailnet 地址上监听，不绑定系统网卡
++    #   - name: windows-ssh
++    #     network: tcp # tcp 或 udp
++    #     listen-port: 22
++    #     target: 127.0.0.1:22
++    #   - name: local-udp-service
++    #     network: udp
++    #     listen-port: 12345
++    #     target: 127.0.0.1:12345
+     # 当目标不在 Tailscale 路由内时，连接会直接报错，不会回退到直连；
+     # 访问公网需要配置可用的 exit-node，或接受覆盖目标网段的 subnet routes。
+     # 一个出站代理的标识。当值不为空时，将使用指定的 proxy 发出 Tailscale 控制面和 DERP/STUN 等连接
+diff --git a/hub/executor/executor.go b/hub/executor/executor.go
+index 0ffb6c6b..306c369c 100644
+--- a/hub/executor/executor.go
++++ b/hub/executor/executor.go
+@@ -13,6 +13,7 @@ import (
+ 
+ 	"github.com/metacubex/mihomo/adapter"
+ 	"github.com/metacubex/mihomo/adapter/inbound"
++	"github.com/metacubex/mihomo/adapter/outbound"
+ 	"github.com/metacubex/mihomo/adapter/outboundgroup"
+ 	"github.com/metacubex/mihomo/component/auth"
+ 	"github.com/metacubex/mihomo/component/ca"
+@@ -307,7 +308,33 @@ func updateHosts(tree *trie.DomainTrie[resolver.HostValue]) {
+ }
+ 
+ func updateProxies(proxies map[string]C.Proxy, providers map[string]P.ProxyProvider) {
++	forwardStateDirs := make(map[string]struct{})
++	for _, proxy := range proxies {
++		if !outbound.HasInboundForwards(proxy.Adapter()) {
++			continue
++		}
++		if stateDir, ok := outbound.TailscaleStateDir(proxy.Adapter()); ok {
++			forwardStateDirs[stateDir] = struct{}{}
++		}
++	}
++	for _, proxy := range tunnel.Proxies() {
++		stateDir, isTailscale := outbound.TailscaleStateDir(proxy.Adapter())
++		_, stateDirWillHostForwards := forwardStateDirs[stateDir]
++		if outbound.HasInboundForwards(proxy.Adapter()) || (isTailscale && stateDirWillHostForwards) {
++			if err := proxy.Close(); err != nil {
++				log.Warnln("Close outdated proxy [%s] with inbound forwards failed: %v", proxy.Name(), err)
++			}
++		}
++	}
+ 	tunnel.UpdateProxies(proxies, providers)
++	for _, proxy := range proxies {
++		started, err := outbound.StartInboundForwards(proxy.Adapter())
++		if err != nil {
++			log.Errorln("Start inbound forwards for proxy [%s] failed: %v", proxy.Name(), err)
++		} else if started {
++			log.Infoln("Started inbound forwards for proxy [%s]", proxy.Name())
++		}
++	}
+ }
+ 
+ func updateRules(rules []C.Rule, subRules map[string][]C.Rule, ruleProviders map[string]P.RuleProvider) {

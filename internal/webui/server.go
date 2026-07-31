@@ -126,7 +126,7 @@ func buildStatus(cfg *config.Config) statusPayload {
 	}
 	if cfg.Tailscale.Enabled {
 		if cfg.Tailscale.AuthKey != "" || cfg.Tailscale.AuthKeyFile != "" {
-			add("Tailnet", "已启用", "ok", fmt.Sprintf("%d 条路由", len(cfg.Tailscale.Routes)+len(cfg.Tailscale.IPv6Routes)))
+			add("Tailnet", "已启用", "ok", fmt.Sprintf("%d 条路由，%d 个入站转发", len(cfg.Tailscale.Routes)+len(cfg.Tailscale.IPv6Routes), len(cfg.Tailscale.InboundForwards)))
 		} else {
 			add("Tailnet", "缺少 Auth Key", "warn", "")
 		}
@@ -278,6 +278,11 @@ func (s *Server) configAPI(w http.ResponseWriter, r *http.Request) {
 			if path == "" {
 				path = config.DefaultConfigPath
 			}
+			req.Config.ApplyDefaults()
+			if err := req.Config.Validate(); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			if err := saveConfig(path, req.Config); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -285,9 +290,14 @@ func (s *Server) configAPI(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]any{"ok": true, "path": path})
 			return
 		} else {
-			var parsed map[string]any
+			var parsed config.Config
 			if err := json.Unmarshal([]byte(req.Content), &parsed); err != nil {
 				http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			parsed.ApplyDefaults()
+			if err := parsed.Validate(); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 		}
@@ -440,6 +450,10 @@ func (s *Server) actionAPI(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if err := runner.MarkMihomoDownloaded(cfg); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		message = "mihomo 已安装: " + path
 	case "download-dashboard":
 		path, err := updater.Download(cfg.Components.Dashboard, "dashboard")
@@ -499,6 +513,9 @@ func saveConfig(path string, cfg *config.Config) error {
 		path = config.DefaultConfigPath
 	}
 	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(cfg.Setup.ProviderURL) != "" {
 		if err := generator.RefreshProviders(cfg); err != nil {
 			return err
@@ -746,6 +763,11 @@ const indexHTML = `<!doctype html>
           </div>
         </div>
         <div class="panel">
+          <h2>Tailnet 入站转发</h2>
+          <div class="hint">只监听 MeshMux 内嵌 tsnet 节点的 Tailnet 地址，不绑定 Windows 局域网或公网网卡。每行格式：名称,协议,监听端口,目标地址。</div>
+          <textarea id="tsInboundForwards" spellcheck="false" placeholder="windows-ssh,tcp,22,127.0.0.1:22&#10;example-udp,udp,12345,127.0.0.1:12345"></textarea>
+        </div>
+        <div class="panel">
           <h2>配置 JSON</h2>
           <textarea id="advancedJson" spellcheck="false"></textarea>
           <div class="actions">
@@ -787,6 +809,7 @@ const indexHTML = `<!doctype html>
     function ensure(c){
       c.name ||= 'default'; c.setup ||= {}; c.ports ||= {}; c.paths ||= {}; c.providers ||= [];
       c.tun ||= {}; c.dns ||= {}; c.rules ||= {}; c.tailscale ||= {}; c.wireguard ||= {};
+      c.tailscale.inboundForwards ||= [];
       c.wireguard.configs ||= [];
       c.components ||= {}; c.components.mihomo ||= {}; c.components.dashboard ||= {};
       c.targets ||= []; c.publish ||= []; return c;
@@ -829,6 +852,7 @@ const indexHTML = `<!doctype html>
       setVal('controller', cfg.ports.controller || '127.0.0.1:9090');
       setVal('tsMagic', cfg.tailscale.magicDnsSuffix || '');
       setVal('tsDomains', (cfg.tailscale.domains || ['*.ts.net']).join(', '));
+      setVal('tsInboundForwards', (cfg.tailscale.inboundForwards || []).map(f => [f.name, f.network, f.listenPort, f.target].join(',')).join('\n'));
       refreshWireGuardSummary();
       el('advancedJson').value = JSON.stringify(storageConfig(cfg), null, 2);
     }
@@ -854,6 +878,12 @@ const indexHTML = `<!doctype html>
       cfg.tailscale.ipv6Routes = cfg.tailscale.ipv6Routes?.length ? cfg.tailscale.ipv6Routes : ['fd7a:115c:a1e0::/48'];
       cfg.tailscale.magicDnsSuffix = val('tsMagic');
       cfg.tailscale.domains = val('tsDomains').split(',').map(s => s.trim()).filter(Boolean);
+      cfg.tailscale.inboundForwards = val('tsInboundForwards').split(/\r?\n/).map((line, index) => {
+        if (!line.trim()) return null;
+        const parts = line.split(',').map(s => s.trim());
+        if (parts.length !== 4) throw new Error('Tailnet 入站转发第 ' + (index + 1) + ' 行格式错误');
+        return {name:parts[0], network:parts[1].toLowerCase(), listenPort:Number(parts[2]), target:parts[3]};
+      }).filter(Boolean);
       cfg.tun.enabled = mode === 'tun';
       cfg.tun.stack = 'mixed';
       cfg.tun.autoRoute = mode === 'tun';

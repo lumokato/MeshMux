@@ -15,7 +15,7 @@ import (
 )
 
 func TestIndexHTMLIsChineseFormUI(t *testing.T) {
-	for _, want := range []string{"快速设置", "Sub-Store 地址", "后端名", "生成并上传手机配置", "导入 WireGuard 配置", "multiple", "状态概览"} {
+	for _, want := range []string{"快速设置", "Sub-Store 地址", "后端名", "生成并上传手机配置", "导入 WireGuard 配置", "multiple", "状态概览", "Tailnet 入站转发", "tsInboundForwards"} {
 		if !strings.Contains(indexHTML, want) {
 			t.Fatalf("indexHTML missing %q", want)
 		}
@@ -24,6 +24,45 @@ func TestIndexHTMLIsChineseFormUI(t *testing.T) {
 		if strings.Contains(indexHTML, private) {
 			t.Fatalf("indexHTML should not contain %q", private)
 		}
+	}
+}
+
+func TestConfigAPIRejectsInvalidInboundForward(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "meshmux.local.json")
+	data, err := json.Marshal(config.Config{Name: "before"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	server, err := Start(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	}()
+
+	invalid := config.Config{Name: "invalid", Tailscale: config.Tailscale{
+		Enabled:         true,
+		InboundForwards: []config.InboundForward{{Name: "ssh", Network: "tcp", ListenPort: 22, Target: "invalid"}},
+	}}
+	body, err := json.Marshal(map[string]any{"config": invalid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configURL := strings.Replace(server.URL, "/?token=", "/api/config?token=", 1)
+	resp, err := http.Post(configURL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST invalid config status = %d", resp.StatusCode)
 	}
 }
 
