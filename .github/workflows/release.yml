@@ -56,7 +56,7 @@ jobs:
           $repo = (Get-Location).Path
           $components = Join-Path $env:RUNNER_TEMP "meshmux-components"
           Remove-Item -LiteralPath $components -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path build\bin,$components | Out-Null
+          New-Item -ItemType Directory -Force -Path build\bin,$components,(Join-Path $components "downloads") | Out-Null
 
           Push-Location $components
           $mihomoArchive = "mihomo-windows-amd64-compatible-$env:MIHOMO_CORE_VERSION.zip"
