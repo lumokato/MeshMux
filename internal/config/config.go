@@ -19,7 +19,8 @@ const (
 	DefaultConfigPath         = "meshmux.local.json"
 	ExampleConfigPath         = "templates/meshmux.example.json"
 	DefaultMihomoRepo         = "lumokato/MeshMux"
-	DefaultMihomoAssetPattern = `mihomo-windows-amd64-compatible-v1\.19\.26-meshmux\.1\.zip$`
+	DefaultMihomoReleaseTag   = "mihomo-v1.19.29-meshmux.1"
+	DefaultMihomoAssetPattern = `mihomo-windows-amd64-compatible-v1\.19\.29-meshmux\.1\.zip$`
 )
 
 type Config struct {
@@ -146,6 +147,7 @@ type Components struct {
 type Component struct {
 	Path         string `json:"path"`
 	Repo         string `json:"repo"`
+	ReleaseTag   string `json:"releaseTag,omitempty"`
 	AssetPattern string `json:"assetPattern"`
 }
 
@@ -272,9 +274,13 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Components.Mihomo.Repo == "" || legacyMihomoComponent(c.Components.Mihomo) {
 		c.Components.Mihomo.Repo = DefaultMihomoRepo
+		c.Components.Mihomo.ReleaseTag = DefaultMihomoReleaseTag
 		c.Components.Mihomo.AssetPattern = DefaultMihomoAssetPattern
 	} else if c.Components.Mihomo.AssetPattern == "" {
 		c.Components.Mihomo.AssetPattern = DefaultMihomoAssetPattern
+	}
+	if c.Components.Mihomo.Repo == DefaultMihomoRepo && c.Components.Mihomo.ReleaseTag == "" {
+		c.Components.Mihomo.ReleaseTag = DefaultMihomoReleaseTag
 	}
 	if c.Components.Dashboard.Path == "" {
 		c.Components.Dashboard.Path = "dashboard"
@@ -291,15 +297,18 @@ func (c *Config) ApplyDefaults() {
 }
 
 func legacyMihomoComponent(component Component) bool {
-	if component.Repo != "MetaCubeX/mihomo" {
-		return false
+	switch component.Repo {
+	case "MetaCubeX/mihomo":
+		switch component.AssetPattern {
+		case "", `mihomo-windows-amd64-compatible.*\.zip$`, `mihomo-windows-amd64.*\.zip$`:
+			return true
+		}
+	case "lumokato/mihomo":
+		return component.AssetPattern == `mihomo-windows-amd64-compatible-v1\.19\.26-meshmux\.1\.zip$`
+	case "lumokato/MeshMux":
+		return component.AssetPattern == `mihomo-windows-amd64-compatible-v1\.19\.26-meshmux\.1\.zip$`
 	}
-	switch component.AssetPattern {
-	case "", `mihomo-windows-amd64-compatible.*\.zip$`, `mihomo-windows-amd64.*\.zip$`:
-		return true
-	default:
-		return false
-	}
+	return false
 }
 
 func (c *Config) Validate() error {

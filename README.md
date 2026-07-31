@@ -86,4 +86,4 @@ Android 端使用 mobile profile 接入同一套配置。MeshMux 负责生成可
 
 MeshMux 使用 MIT 许可证。安装包内置组件见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-补丁版 Mihomo 固定到上游 `v1.19.26` 提交，补丁、构建脚本和升级流程见 [third_party/mihomo/README.md](third_party/mihomo/README.md)。Release 同时发布核心二进制和对应源码包。
+补丁版 Mihomo 基于上游 `v1.19.29`，作为 [MeshMux 固定核心资产](https://github.com/lumokato/MeshMux/releases/tag/mihomo-v1.19.29-meshmux.1) 发布，包含二进制和对应源码包。MeshMux CI 只下载固定资产并校验 SHA-256，不在每次应用发版时重新编译完整核心。

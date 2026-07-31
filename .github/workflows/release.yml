@@ -14,22 +14,16 @@ on:
 permissions:
   contents: write
 
+env:
+  MIHOMO_CORE_VERSION: v1.19.29-meshmux.1
+  MIHOMO_CORE_SHA256: B0E8B3680726F314AC483DCB78C2A7D4193373DD88750884019A0A08352C281B
+
 jobs:
   windows:
     runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Go for mihomo
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.x"
-
-      - name: Build patched mihomo
-        shell: pwsh
-        run: |
-          .\scripts\build-mihomo.ps1 -OutputDir build\mihomo -PackageSource
 
       - name: Set up Go for MeshMux
         uses: actions/setup-go@v5
@@ -63,9 +57,20 @@ jobs:
           $components = Join-Path $env:RUNNER_TEMP "meshmux-components"
           Remove-Item -LiteralPath $components -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path build\bin,$components | Out-Null
-          Copy-Item build\mihomo\mihomo-windows-amd64-compatible.exe build\bin\mihomo.exe -Force
 
           Push-Location $components
+          $mihomoArchive = "mihomo-windows-amd64-compatible-$env:MIHOMO_CORE_VERSION.zip"
+          Invoke-WebRequest `
+            -Uri "https://github.com/lumokato/MeshMux/releases/download/mihomo-$env:MIHOMO_CORE_VERSION/$mihomoArchive" `
+            -OutFile $mihomoArchive `
+            -UseBasicParsing
+          $mihomoHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mihomoArchive).Hash
+          if ($mihomoHash -ne $env:MIHOMO_CORE_SHA256) {
+            throw "Mihomo core checksum mismatch: $mihomoHash"
+          }
+          Expand-Archive -LiteralPath $mihomoArchive -DestinationPath mihomo -Force
+          Copy-Item mihomo\mihomo-windows-amd64-compatible.exe "$repo\build\bin\mihomo.exe" -Force
+
           $geoip = "downloads\geoip.metadb"
           Invoke-WebRequest `
             -Uri "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb" `
@@ -90,9 +95,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: MeshMux-Windows
-          path: |
-            release/*.exe
-            build/mihomo/*.zip
+          path: release/*.exe
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -107,7 +110,5 @@ jobs:
             - 默认关闭，不配置 `inboundForwards` 时保持原有行为。
             - 升级时安全同步安装包内置的补丁版 mihomo，同时保留显式自定义或已下载核心。
 
-            安装包内置 MeshMux 补丁版 mihomo、geoip.metadb 和 MetaCubeXD。mihomo 二进制与对应源码包随 Release 发布，第三方组件来源见 THIRD_PARTY_NOTICES.md。
-          files: |
-            release/*.exe
-            build/mihomo/*.zip
+            安装包内置 MeshMux 固定核心 `v1.19.29-meshmux.1`、geoip.metadb 和 MetaCubeXD。核心二进制与对应源码见 [固定核心资产](https://github.com/lumokato/MeshMux/releases/tag/mihomo-v1.19.29-meshmux.1)，第三方组件来源见 THIRD_PARTY_NOTICES.md。
+          files: release/*.exe

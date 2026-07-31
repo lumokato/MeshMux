@@ -103,17 +103,16 @@ func TestValidateTailscaleInboundForwardsRejectsInvalidConfig(t *testing.T) {
 }
 
 func TestApplyDefaultsMigratesLegacyMihomoComponent(t *testing.T) {
-	for _, pattern := range []string{
-		`mihomo-windows-amd64-compatible.*\.zip$`,
-		`mihomo-windows-amd64.*\.zip$`,
+	for _, component := range []Component{
+		{Repo: "MetaCubeX/mihomo", AssetPattern: `mihomo-windows-amd64-compatible.*\.zip$`},
+		{Repo: "MetaCubeX/mihomo", AssetPattern: `mihomo-windows-amd64.*\.zip$`},
+		{Repo: "lumokato/mihomo", AssetPattern: `mihomo-windows-amd64-compatible-v1\.19\.26-meshmux\.1\.zip$`},
+		{Repo: "lumokato/MeshMux", AssetPattern: `mihomo-windows-amd64-compatible-v1\.19\.26-meshmux\.1\.zip$`},
 	} {
-		t.Run(pattern, func(t *testing.T) {
-			cfg := Config{Components: Components{Mihomo: Component{
-				Repo:         "MetaCubeX/mihomo",
-				AssetPattern: pattern,
-			}}}
+		t.Run(component.Repo+"/"+component.AssetPattern, func(t *testing.T) {
+			cfg := Config{Components: Components{Mihomo: component}}
 			cfg.ApplyDefaults()
-			if cfg.Components.Mihomo.Repo != DefaultMihomoRepo || cfg.Components.Mihomo.AssetPattern != DefaultMihomoAssetPattern {
+			if cfg.Components.Mihomo.Repo != DefaultMihomoRepo || cfg.Components.Mihomo.ReleaseTag != DefaultMihomoReleaseTag || cfg.Components.Mihomo.AssetPattern != DefaultMihomoAssetPattern {
 				t.Fatalf("mihomo component = %+v", cfg.Components.Mihomo)
 			}
 		})
@@ -123,10 +122,11 @@ func TestApplyDefaultsMigratesLegacyMihomoComponent(t *testing.T) {
 func TestApplyDefaultsPreservesCustomMihomoComponent(t *testing.T) {
 	cfg := Config{Components: Components{Mihomo: Component{
 		Repo:         "example/custom-mihomo",
+		ReleaseTag:   "custom-v1",
 		AssetPattern: `custom\.zip$`,
 	}}}
 	cfg.ApplyDefaults()
-	if cfg.Components.Mihomo.Repo != "example/custom-mihomo" || cfg.Components.Mihomo.AssetPattern != `custom\.zip$` {
+	if cfg.Components.Mihomo.Repo != "example/custom-mihomo" || cfg.Components.Mihomo.ReleaseTag != "custom-v1" || cfg.Components.Mihomo.AssetPattern != `custom\.zip$` {
 		t.Fatalf("custom mihomo component changed: %+v", cfg.Components.Mihomo)
 	}
 }

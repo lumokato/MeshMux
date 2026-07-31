@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -36,7 +37,7 @@ func Download(component config.Component, kind string) (string, error) {
 	if component.Path == "" {
 		return "", fmt.Errorf("%s path is empty", kind)
 	}
-	asset, err := latestAsset(component.Repo, component.AssetPattern)
+	asset, err := releaseAsset(component.Repo, component.ReleaseTag, component.AssetPattern)
 	if err != nil {
 		return "", err
 	}
@@ -57,8 +58,12 @@ func Download(component config.Component, kind string) (string, error) {
 	}
 }
 
-func latestAsset(repo, pattern string) (asset, error) {
-	resp, err := httpClient().Get("https://api.github.com/repos/" + repo + "/releases/latest")
+func releaseAsset(repo, tag, pattern string) (asset, error) {
+	endpoint := "https://api.github.com/repos/" + repo + "/releases/latest"
+	if tag != "" {
+		endpoint = "https://api.github.com/repos/" + repo + "/releases/tags/" + url.PathEscape(tag)
+	}
+	resp, err := httpClient().Get(endpoint)
 	if err != nil {
 		return asset{}, err
 	}

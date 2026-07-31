@@ -1,2 +1,1 @@
 installer/*.iss linguist-vendored
-third_party/mihomo/*.patch text eol=lf

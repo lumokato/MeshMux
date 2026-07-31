@@ -26,7 +26,7 @@ MeshMux is a Windows tray tool for mihomo-based proxy, WireGuard, Tailscale, and
 
 MeshMux bundles a patched Mihomo core that listens only on the embedded tsnet node's Tailnet addresses and forwards configured TCP or UDP ports to local targets. Tailscale ACLs and Grants remain the access-control layer. The mappings are emitted only in the Windows profile; mobile profiles do not inherit them. With no mappings configured, existing outbound-only behavior is unchanged.
 
-See the Chinese README for the full JSON example and [third_party/mihomo/README.md](third_party/mihomo/README.md) for the pinned upstream commit, patch, reproducible build, and upgrade procedure.
+See the Chinese README for the full JSON example. The patched core is based on upstream `v1.19.29`; its binary and corresponding source are published as a [fixed MeshMux core asset](https://github.com/lumokato/MeshMux/releases/tag/mihomo-v1.19.29-meshmux.1). MeshMux CI downloads that asset, verifies its SHA-256, and does not rebuild Mihomo for every application release.
 
 ## Paths
 
