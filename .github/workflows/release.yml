@@ -1,6 +1,9 @@
 name: release
 
 on:
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       version:
@@ -15,11 +18,13 @@ permissions:
   contents: write
 
 env:
+  DEVELOPMENT_VERSION: 0.3.0
   MIHOMO_CORE_VERSION: v1.19.29-meshmux.1
   MIHOMO_CORE_SHA256: B0E8B3680726F314AC483DCB78C2A7D4193373DD88750884019A0A08352C281B
+  MIHOMO_SOURCE_SHA256: E9D3E44CDD9ED84C89FEB36A36E31F5DE1C7D40B32E711A055F0544A3E328B89
 
 jobs:
-  linux-check:
+  linux:
     runs-on: ubuntu-latest
 
     steps:
@@ -37,20 +42,70 @@ jobs:
         shell: bash
         run: |
           version="${{ github.event.inputs.version }}"
-          if [[ -z "$version" ]]; then
+          if [[ -z "$version" && "$GITHUB_REF" == refs/tags/v* ]]; then
             version="${GITHUB_REF_NAME#v}"
+          fi
+          if [[ -z "$version" ]]; then
+            version="$DEVELOPMENT_VERSION"
           fi
           echo "MESHMUX_VERSION=$version" >> "$GITHUB_ENV"
 
-      - name: Test and build Linux binaries
+      - name: Test MeshMux
         run: |
           go test ./...
           go vet ./...
-          go build -ldflags "-s -w -X main.version=$MESHMUX_VERSION" -o /tmp/meshmux ./cmd/meshmux
-          go build -ldflags "-s -w -X main.version=$MESHMUX_VERSION" -o /tmp/meshmux-tray ./cmd/meshmux-tray
+
+      - name: Build Linux application bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/meshmux-linux"
+          components="$RUNNER_TEMP/meshmux-components"
+          archive="MeshMux-linux-amd64-v${MESHMUX_VERSION}.tar.gz"
+          mkdir -p "$bundle/bin" "$components"
+
+          go build -trimpath -ldflags "-s -w -X main.version=$MESHMUX_VERSION" -o "$bundle/meshmux" ./cmd/meshmux
+          go build -trimpath -ldflags "-s -w -X main.version=$MESHMUX_VERSION" -o "$bundle/meshmux-tray" ./cmd/meshmux-tray
+
+          core_source="mihomo-source-${MIHOMO_CORE_VERSION}.zip"
+          curl --fail --location --retry 3 \
+            --output "$components/$core_source" \
+            "https://github.com/lumokato/MeshMux/releases/download/mihomo-${MIHOMO_CORE_VERSION}/${core_source}"
+          echo "${MIHOMO_SOURCE_SHA256}  $components/$core_source" | sha256sum --check --strict
+          unzip -q "$components/$core_source" -d "$components/mihomo-source"
+          (
+            cd "$components/mihomo-source"
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 go build \
+              -tags with_gvisor \
+              -trimpath \
+              -ldflags "-X github.com/metacubex/mihomo/constant.Version=${MIHOMO_CORE_VERSION} -X github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -s -w -buildid=" \
+              -o "$bundle/bin/mihomo" .
+          )
+
+          curl --fail --location --retry 3 \
+            --output "$bundle/bin/geoip.metadb" \
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb"
+
+          "$bundle/meshmux" download dashboard -config "$GITHUB_WORKSPACE/templates/meshmux.example.json"
+          cp -a dashboard "$bundle/dashboard"
+          cp templates/meshmux.example.json "$bundle/meshmux.local.json"
+          cp packaging/linux/meshmux.service packaging/linux/meshmux-web.service "$bundle/"
+          cp packaging/linux/meshmux-tray.desktop packaging/linux/meshmux-sudoers "$bundle/"
+          cp packaging/linux/README.release.md "$bundle/README-Linux.md"
+          cp README.md README.en.md LICENSE SECURITY.md THIRD_PARTY_NOTICES.md "$bundle/"
+
+          tar -C "$RUNNER_TEMP" -czf "$archive" meshmux-linux
+          sha256sum "$archive" > "${archive}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MeshMux-Linux-amd64
+          path: |
+            MeshMux-linux-amd64-v*.tar.gz
+            MeshMux-linux-amd64-v*.tar.gz.sha256
+          if-no-files-found: error
 
   windows:
-    needs: linux-check
     runs-on: windows-latest
 
     steps:
@@ -68,8 +123,11 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.event.inputs.version }}"
-          if (-not $version) {
+          if (-not $version -and "${{ github.ref }}" -like "refs/tags/v*") {
             $version = "${{ github.ref_name }}".TrimStart("v")
+          }
+          if (-not $version) {
+            $version = $env:DEVELOPMENT_VERSION
           }
           "MESHMUX_VERSION=$version" >> $env:GITHUB_ENV
 
@@ -123,13 +181,48 @@ jobs:
         shell: pwsh
         run: ISCC.exe .\installer\MeshMux.iss
 
+      - name: Write installer checksum
+        shell: pwsh
+        run: |
+          Get-ChildItem release\*.exe | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Set-Content -Encoding ascii -NoNewline "$($_.FullName).sha256"
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: MeshMux-Windows
-          path: release/*.exe
+          path: |
+            release/*.exe
+            release/*.exe.sha256
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: MeshMux-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Resolve version
+        shell: bash
+        run: echo "MESHMUX_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum --check --strict ./*.sha256
+          test "$(find . -maxdepth 1 -type f -name '*.exe' | wc -l)" -eq 1
+          test "$(find . -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           name: MeshMux ${{ env.MESHMUX_VERSION }}
@@ -142,5 +235,5 @@ jobs:
             - Linux 托盘支持核心、自启和桌面系统代理控制，退出托盘不停止核心。
             - 配置生成、运行态探测、下载与 Web 管理页适配 Windows/Linux 双平台。
 
-            安装包内置 MeshMux 固定核心 `v1.19.29-meshmux.1`、geoip.metadb 和 MetaCubeXD。核心二进制与对应源码见 [固定核心资产](https://github.com/lumokato/MeshMux/releases/tag/mihomo-v1.19.29-meshmux.1)，第三方组件来源见 THIRD_PARTY_NOTICES.md。
-          files: release/*.exe
+            Release 同时提供 Windows 安装包与 Linux amd64 应用包，均附 SHA-256。两端均包含 MeshMux 固定核心 `v1.19.29-meshmux.1`、geoip.metadb 和 MetaCubeXD。核心二进制与对应源码见 [固定核心资产](https://github.com/lumokato/MeshMux/releases/tag/mihomo-v1.19.29-meshmux.1)，第三方组件来源见 THIRD_PARTY_NOTICES.md。
+          files: release-assets/*
