@@ -51,7 +51,7 @@ Logs rotate automatically by size. `mihomo.out.log` and `mihomo.err.log` are lim
 
 ## Linux
 
-Linux can run the persistent core with `meshmux run linux` and expose the configuration page on loopback with `meshmux serve`. The `packaging/linux` directory contains systemd units, an XFCE login entry, restricted sudoers rules, and the target-host installer. The tray is independent from the core: exiting it does not stop the proxy, and no tray process runs without a graphical session.
+Linux can run the persistent core with `meshmux run linux` and expose the configuration page on loopback with `meshmux serve`. The `packaging/linux` directory contains systemd units, an XFCE login entry, and restricted sudoers deployment examples; adjust their user and paths before installing them in another environment. The tray is independent from the core: exiting it does not stop the proxy, and no tray process runs without a graphical session.
 
 Use `meshmux config-check -config <config-path>` for a read-only completeness check. It reports whether the provider, cache, Tailnet authentication, WireGuard files, and inbound forwards are configured without starting the core, opening a temporary listener, or printing subscription URLs, auth keys, or private keys.
 

@@ -83,7 +83,7 @@ C:\Program Files\MeshMux
 
 ## Linux
 
-Linux 可使用 `meshmux run linux` 运行常驻核心，使用 `meshmux serve` 提供仅监听 loopback 的配置页面。仓库中的 `packaging/linux` 包含 systemd 单元、XFCE 登录自启动项、受限 sudoers 规则和目标机安装脚本。核心服务与托盘相互独立：退出托盘不会停止代理，无图形会话时也不会额外启动托盘。
+Linux 可使用 `meshmux run linux` 运行常驻核心，使用 `meshmux serve` 提供仅监听 loopback 的配置页面。仓库中的 `packaging/linux` 包含 systemd 单元、XFCE 登录自启动项和受限 sudoers 部署示例；在其他账户或目录安装前需要按实际环境调整。核心服务与托盘相互独立：退出托盘不会停止代理，无图形会话时也不会额外启动托盘。
 
 使用 `meshmux config-check -config <配置路径>` 可以只读检查配置完整性。命令只输出订阅、缓存、Tailnet 鉴权、WireGuard 和入站映射是否已配置，不启动核心、不开临时端口，也不会输出订阅地址、Auth Key 或私钥。
 
