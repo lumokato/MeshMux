@@ -2,10 +2,143 @@ package config
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestEnsureLocalConfigMigratesRealLegacyOverBootstrapTemplate(t *testing.T) {
+	root := t.TempDir()
+	local := filepath.Join(root, "Local", AppName)
+	legacy := filepath.Join(root, "Roaming", AppName)
+	example := filepath.Join(root, "meshmux.example.json")
+	template := []byte(`{"name":"default","setup":{"providerUrl":""},"tailscale":{"enabled":false}}`)
+	real := []byte(`{"name":"real","setup":{"providerUrl":"https://secret.invalid/sub"},"tailscale":{"enabled":true,"authKey":"secret"}}`)
+	writeTestFile(t, example, template)
+	writeTestFile(t, filepath.Join(local, DefaultConfigPath), template)
+	writeTestFile(t, filepath.Join(legacy, DefaultConfigPath), real)
+	writeTestFile(t, filepath.Join(legacy, "providers", "main.yaml"), []byte("proxies:\n  - name: node-a\n"))
+	writeTestFile(t, filepath.Join(legacy, "wireguard", "office.conf"), []byte("[Interface]\n"))
+
+	path, err := ensureLocalConfigAt(local, []string{legacy}, example)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"name":"real"`) {
+		t.Fatalf("canonical config was not migrated: %s", data)
+	}
+	for _, copied := range []string{filepath.Join(local, "providers", "main.yaml"), filepath.Join(local, "wireguard", "office.conf")} {
+		if _, err := os.Stat(copied); err != nil {
+			t.Fatalf("migration did not copy %s: %v", copied, err)
+		}
+	}
+}
+
+func TestEnsureLocalConfigPreservesRealCanonicalConfig(t *testing.T) {
+	root := t.TempDir()
+	local := filepath.Join(root, "Local", AppName)
+	legacy := filepath.Join(root, "Roaming", AppName)
+	example := filepath.Join(root, "meshmux.example.json")
+	template := []byte(`{"name":"default","setup":{"providerUrl":""}}`)
+	canonical := []byte(`{"name":"canonical","setup":{"providerUrl":"https://canonical.invalid/sub"}}`)
+	legacyData := []byte(`{"name":"legacy","setup":{"providerUrl":"https://legacy.invalid/sub"}}`)
+	writeTestFile(t, example, template)
+	writeTestFile(t, filepath.Join(local, DefaultConfigPath), canonical)
+	writeTestFile(t, filepath.Join(legacy, DefaultConfigPath), legacyData)
+
+	path, err := ensureLocalConfigAt(local, []string{legacy}, example)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), `"name":"canonical"`) {
+		t.Fatalf("canonical config was replaced: %s", data)
+	}
+}
+
+func TestEnsureLocalConfigIgnoresLegacyBootstrapTemplate(t *testing.T) {
+	root := t.TempDir()
+	local := filepath.Join(root, "Local", AppName)
+	legacy := filepath.Join(root, "Roaming", AppName)
+	example := filepath.Join(root, "meshmux.example.json")
+	template := []byte(`{"name":"default","setup":{"providerUrl":""}}`)
+	writeTestFile(t, example, template)
+	writeTestFile(t, filepath.Join(legacy, DefaultConfigPath), template)
+
+	path, err := ensureLocalConfigAt(local, []string{legacy}, example)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if !IsBootstrapConfig(data) {
+		t.Fatalf("unexpected first-install config: %s", data)
+	}
+}
+
+func TestEnsureCanonicalConfigRecoversServiceSnapshot(t *testing.T) {
+	root := t.TempDir()
+	local := filepath.Join(root, "Local", AppName)
+	example := filepath.Join(root, "meshmux.example.json")
+	serviceSnapshot := filepath.Join(root, "ProgramData", AppName, DefaultConfigPath)
+	template := []byte(`{"name":"default","setup":{"providerUrl":""}}`)
+	real := []byte(`{"name":"service-copy","setup":{"providerUrl":"https://secret.invalid/sub"},"tailscale":{"enabled":true,"authKey":"secret"}}`)
+	writeTestFile(t, example, template)
+	writeTestFile(t, filepath.Join(local, DefaultConfigPath), template)
+	writeTestFile(t, serviceSnapshot, real)
+	t.Setenv("MESHMUX_HOME", local)
+	t.Setenv("APPDATA", filepath.Join(root, "EmptyRoaming"))
+	t.Setenv("ProgramData", filepath.Join(root, "EmptyProgramData"))
+
+	path, err := EnsureCanonicalConfig(filepath.Join(local, DefaultConfigPath), example, serviceSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), `"name":"service-copy"`) {
+		t.Fatal("service snapshot was not recovered")
+	}
+}
+
+func TestBootstrapClassifierPreservesExplicitAndConfiguredModes(t *testing.T) {
+	bootstrap := []byte(`{"name":"default","setup":{"providerUrl":""},"tailscale":{"enabled":false}}`)
+	if !IsBootstrapConfig(bootstrap) {
+		t.Fatal("legacy bootstrap template was not recognized")
+	}
+	for _, configured := range [][]byte{
+		[]byte(`{"setup":{"allowDirectOnly":true}}`),
+		[]byte(`{"setup":{"providerUrl":"https://secret.invalid/sub"}}`),
+		[]byte(`{"wireguard":{"configs":["wireguard/a.conf"]}}`),
+		[]byte(`{"tailscale":{"enabled":true,"authKey":"secret"}}`),
+		[]byte(`{"tailscale":{"enabled":true,"inboundForwards":[{"name":"ssh","network":"tcp","listenPort":22,"target":"127.0.0.1:22"}]}}`),
+	} {
+		if IsBootstrapConfig(configured) {
+			t.Fatalf("configured mode classified as bootstrap: %s", configured)
+		}
+	}
+	for _, incomplete := range [][]byte{
+		[]byte(`{"setup":{"subStoreUrl":"https://substore.invalid/"}}`),
+		[]byte(`{"tun":{"enabled":true,"autoRoute":true}}`),
+	} {
+		if !IsBootstrapConfig(incomplete) {
+			t.Fatalf("incomplete config blocked recovery: %s", incomplete)
+		}
+	}
+}
+
+func writeTestFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestApplyDefaultsDerivesSimpleSubStoreSetup(t *testing.T) {
 	cfg := Config{

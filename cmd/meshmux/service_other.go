@@ -12,4 +12,5 @@ func manageWindowsService([]string) error {
 	return fmt.Errorf("Windows service management is only available on Windows")
 }
 
-func writeWindowsCommandError([]string, error) {}
+func writeWindowsCommandError([]string, error)  {}
+func writeWindowsCommandResult([]string, error) {}

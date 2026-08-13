@@ -2,7 +2,7 @@
 
 MeshMux manages mihomo-based proxy, WireGuard, Tailscale, and mobile profile publishing on Windows desktops and Linux desktop/headless environments.
 
-The Windows installer registers the core as an automatic system service that runs before sign-in. The service only reads a protected runtime snapshot under `ProgramData\MeshMux`; the editable user configuration remains in the existing local data directory. The tray starts after user sign-in and manages the current user's proxy, configuration page, and core controls. UAC is only required for installation, removal, or explicit service control, not during a normal boot.
+The Windows installer registers the core as an automatic system service that runs before sign-in. The service only reads a protected runtime snapshot under `ProgramData\MeshMux`; the editable user configuration has one canonical location under `%LocalAppData%\MeshMux`. If that file is still an installer bootstrap template during an upgrade, MeshMux attempts recovery from the legacy `%AppData%\MeshMux` location and then from the last successful service snapshot. It refuses to replace a working service configuration with an empty template. The service keeps an independent Tailnet identity and signs in with the configured auth key on its first start instead of migrating the old user-core login cache. The tray starts after user sign-in and manages the current user's proxy, configuration page, and core controls. UAC is only required for installation, removal, or explicit service control, not during a normal boot.
 
 ## Features
 
@@ -19,7 +19,7 @@ The Windows installer registers the core as an automatic system service that run
 
 1. Install and start MeshMux.
 2. Open the setup page from the tray menu.
-3. Fill in the proxy subscription, Sub-Store URL, backend name, and file name.
+3. Fill in the daily proxy subscription. Select explicit direct-only mode only when no subscription is intended; without that choice, a missing URL and cache is rejected instead of silently generating an all-`DIRECT` profile.
 4. Import WireGuard configs or enable Tailscale when needed.
 5. Add inbound mappings in the advanced page when Tailnet devices need to reach local services.
 6. Save the config and generate Windows/mobile profiles.
@@ -52,6 +52,8 @@ Logs rotate automatically by size. `mihomo.out.log` and `mihomo.err.log` are lim
 ## Linux
 
 Linux can run the persistent core with `meshmux run linux` and expose the configuration page on loopback with `meshmux serve`. The `packaging/linux` directory contains systemd units, an XFCE login entry, restricted sudoers rules, and the target-host installer. The tray is independent from the core: exiting it does not stop the proxy, and no tray process runs without a graphical session.
+
+Use `meshmux config-check -config <config-path>` for a read-only completeness check. It reports whether the provider, cache, Tailnet authentication, WireGuard files, and inbound forwards are configured without starting the core, opening a temporary listener, or printing subscription URLs, auth keys, or private keys.
 
 ## License
 

@@ -44,6 +44,7 @@ type Config struct {
 
 type Setup struct {
 	ProviderURL      string `json:"providerUrl,omitempty"`
+	AllowDirectOnly  bool   `json:"allowDirectOnly,omitempty"`
 	SubStoreURL      string `json:"subStoreUrl"`
 	SubStoreBackend  string `json:"subStoreBackend"`
 	SubStoreFileName string `json:"subStoreFileName"`
@@ -158,6 +159,13 @@ func ResolveConfigPath(path string) string {
 	if path != "" {
 		return path
 	}
+	if runtime.GOOS == "windows" {
+		if local := LocalConfigPath(); local != DefaultConfigPath {
+			if _, err := os.Stat(local); err == nil {
+				return local
+			}
+		}
+	}
 	if _, err := os.Stat(DefaultConfigPath); err == nil {
 		return DefaultConfigPath
 	}
@@ -189,25 +197,103 @@ func LocalConfigPath() string {
 }
 
 func EnsureLocalConfig(examplePath string) (string, error) {
-	dir := LocalDataDir()
+	legacyDirs := []string{}
+	if runtime.GOOS == "windows" {
+		if roaming := strings.TrimSpace(os.Getenv("APPDATA")); roaming != "" {
+			legacyDirs = append(legacyDirs, filepath.Join(roaming, AppName))
+		}
+		if programData := strings.TrimSpace(os.Getenv("ProgramData")); programData != "" {
+			legacyDirs = append(legacyDirs, filepath.Join(programData, AppName))
+		}
+	}
+	return ensureLocalConfigAt(LocalDataDir(), legacyDirs, examplePath)
+}
+
+func EnsureCanonicalConfig(path, examplePath string, fallbackPaths ...string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return EnsureLocalConfig(examplePath)
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	localPath, err := filepath.Abs(LocalConfigPath())
+	if err != nil || !strings.EqualFold(filepath.Clean(absPath), filepath.Clean(localPath)) {
+		return absPath, nil
+	}
+	canonical, err := EnsureLocalConfig(examplePath)
+	if err != nil {
+		return "", err
+	}
+	currentData, err := os.ReadFile(canonical)
+	if err != nil || !IsBootstrapConfig(currentData) {
+		return canonical, err
+	}
+	for _, fallbackPath := range fallbackPaths {
+		fallbackData, readErr := os.ReadFile(fallbackPath)
+		if readErr != nil || IsBootstrapConfig(fallbackData) {
+			continue
+		}
+		if _, _, loadErr := loadData(fallbackData, fallbackPath); loadErr != nil {
+			continue
+		}
+		if err := writeConfigFile(canonical, fallbackData); err != nil {
+			return "", err
+		}
+		return canonical, nil
+	}
+	return canonical, nil
+}
+
+func ensureLocalConfigAt(dir string, legacyDirs []string, examplePath string) (string, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
 	path := filepath.Join(dir, DefaultConfigPath)
-	if _, err := os.Stat(path); err == nil {
-		return path, nil
-	}
 	if examplePath == "" {
 		examplePath = ExampleConfigPath
 	}
-	data, err := os.ReadFile(examplePath)
+	exampleData, err := os.ReadFile(examplePath)
 	if err != nil {
-		data, err = os.ReadFile(ExampleConfigPath)
+		exampleData, err = os.ReadFile(ExampleConfigPath)
 		if err != nil {
 			return "", err
 		}
 	}
-	return path, os.WriteFile(path, data, 0600)
+
+	currentData, currentErr := os.ReadFile(path)
+	if currentErr == nil && !IsBootstrapConfig(currentData) {
+		return path, nil
+	}
+	if currentErr != nil && !os.IsNotExist(currentErr) {
+		return "", currentErr
+	}
+
+	for _, legacyDir := range legacyDirs {
+		legacyPath := filepath.Join(legacyDir, DefaultConfigPath)
+		legacyData, readErr := os.ReadFile(legacyPath)
+		if readErr != nil || IsBootstrapConfig(legacyData) {
+			continue
+		}
+		if _, _, loadErr := loadData(legacyData, legacyPath); loadErr != nil {
+			continue
+		}
+		if err := writeConfigFile(path, legacyData); err != nil {
+			return "", err
+		}
+		for _, name := range []string{"providers", "wireguard"} {
+			if err := copyMissingTree(filepath.Join(legacyDir, name), filepath.Join(dir, name)); err != nil {
+				return "", err
+			}
+		}
+		return path, nil
+	}
+
+	if currentErr == nil {
+		return path, nil
+	}
+	return path, writeConfigFile(path, exampleData)
 }
 
 func Load(path string) (*Config, string, error) {
@@ -216,6 +302,10 @@ func Load(path string) (*Config, string, error) {
 	if err != nil {
 		return nil, resolved, err
 	}
+	return loadData(data, resolved)
+}
+
+func loadData(data []byte, resolved string) (*Config, string, error) {
 	data = bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
@@ -226,6 +316,94 @@ func Load(path string) (*Config, string, error) {
 		return nil, resolved, err
 	}
 	return &cfg, resolved, nil
+}
+
+func IsBootstrapConfig(data []byte) bool {
+	data = bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
+	var cfg Config
+	if json.Unmarshal(data, &cfg) != nil {
+		return false
+	}
+	if cfg.Setup.AllowDirectOnly || strings.TrimSpace(cfg.Setup.ProviderURL) != "" {
+		return false
+	}
+	for _, provider := range cfg.Providers {
+		if strings.TrimSpace(provider.URL) != "" {
+			return false
+		}
+	}
+	if len(cfg.WireGuard.Configs) > 0 || len(cfg.WireGuard.Domains) > 0 || len(cfg.WireGuard.Routes) > 0 {
+		return false
+	}
+	if cfg.Tailscale.Enabled || strings.TrimSpace(cfg.Tailscale.AuthKey) != "" ||
+		strings.TrimSpace(cfg.Tailscale.AuthKeyFile) != "" || len(cfg.Tailscale.InboundForwards) > 0 ||
+		strings.TrimSpace(cfg.Tailscale.ExitNode) != "" || strings.TrimSpace(cfg.Tailscale.MagicDNSSuffix) != "" {
+		return false
+	}
+	return true
+}
+
+func writeConfigFile(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".config-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0600); err != nil {
+		temp.Close()
+		return err
+	}
+	if _, err := temp.Write(data); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(tempPath, path)
+}
+
+func copyMissingTree(source, destination string) error {
+	info, err := os.Stat(source)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return nil
+	}
+	return filepath.Walk(source, func(path string, entry os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destination, relative)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0700)
+		}
+		if _, err := os.Stat(target); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0600)
+	})
 }
 
 func InitLocal(overwrite bool) error {

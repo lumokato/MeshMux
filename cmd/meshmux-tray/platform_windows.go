@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -28,7 +29,22 @@ func newPlatformBackend() (trayBackend, error) {
 
 func platformStartupFatal(error) bool { return false }
 
-func recordTrayActionError(string, error) {}
+func recordTrayActionError(action string, err error) {
+	if err == nil {
+		return
+	}
+	dataDir := config.LocalDataDir()
+	if mkdirErr := os.MkdirAll(filepath.Join(dataDir, "logs"), 0700); mkdirErr != nil {
+		return
+	}
+	file, openErr := os.OpenFile(filepath.Join(dataDir, "logs", "tray.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if openErr != nil {
+		return
+	}
+	defer file.Close()
+	logger := log.New(file, "", log.Ldate|log.Ltime|log.Lmicroseconds)
+	logger.Printf("MeshMux tray action %q failed: %v", action, err)
+}
 
 func (b *windowsBackend) Capabilities() trayCapabilities {
 	return trayCapabilities{SystemProxy: true}
@@ -65,14 +81,16 @@ func (b *windowsBackend) InitialStart() error {
 func (b *windowsBackend) State() (trayState, error) {
 	state := trayState{
 		SystemProxyOn:    runner.ProxyEnabled(),
-		AutostartEnabled: runner.AutostartEnabled() || winservice.Installed(),
+		AutostartEnabled: runner.AutostartEnabled(),
 	}
 	cfg, _, err := config.Load(b.cfgPath)
 	if err != nil {
 		return state, err
 	}
 	if winservice.Installed() {
-		state.CoreRunning = winservice.Running() && runner.ControllerReady(cfg)
+		state.CoreRunning = winservice.Running()
+		state.CoreDegraded = state.CoreRunning && !runner.ControllerReady(cfg)
+		state.AutostartEnabled = winservice.AutostartEnabled()
 	} else {
 		state.CoreRunning = runner.IsRunning(cfg)
 	}

@@ -26,7 +26,9 @@ import (
 var version = "0.3.0"
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	err := run(os.Args[1:])
+	writeWindowsCommandResult(os.Args[1:], err)
+	if err != nil {
 		writeWindowsCommandError(os.Args[1:], err)
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -46,6 +48,8 @@ func run(args []string) error {
 	case "version":
 		fmt.Println(version)
 		return nil
+	case "config-check":
+		return checkConfig(args[1:], os.Stdout)
 	case "init":
 		fs := flag.NewFlagSet("init", flag.ContinueOnError)
 		overwrite := fs.Bool("force", false, "overwrite meshmux.local.json")
@@ -346,6 +350,93 @@ func load(args []string) (*config.Config, string, error) {
 	return cfg, absPath, nil
 }
 
+func checkConfig(args []string, output io.Writer) error {
+	cfg, path, err := load(args)
+	if err != nil {
+		return err
+	}
+
+	providerConfigured := strings.TrimSpace(cfg.Setup.ProviderURL) != ""
+	providerCacheAvailable := false
+	for _, provider := range cfg.Providers {
+		if strings.TrimSpace(provider.URL) != "" {
+			providerConfigured = true
+		}
+		cachePath := strings.TrimSpace(provider.Path)
+		if cachePath == "" && strings.TrimSpace(provider.Name) != "" {
+			cachePath = filepath.Join("providers", provider.Name+".yaml")
+		}
+		if fileHasContent(cachePath) {
+			providerCacheAvailable = true
+		}
+	}
+
+	authConfigured := strings.TrimSpace(cfg.Tailscale.AuthKey) != ""
+	if !authConfigured && strings.TrimSpace(cfg.Tailscale.AuthKeyFile) != "" {
+		authConfigured = fileHasContent(cfg.Tailscale.AuthKeyFile)
+	}
+
+	wireGuardAvailable := 0
+	for _, path := range cfg.WireGuard.Configs {
+		if fileHasContent(path) {
+			wireGuardAvailable++
+		}
+	}
+
+	dailyProxyOK := cfg.Setup.AllowDirectOnly || providerConfigured || providerCacheAvailable
+	tailnetAuthOK := !cfg.Tailscale.Enabled || authConfigured
+	wireGuardOK := wireGuardAvailable == len(cfg.WireGuard.Configs)
+
+	fmt.Fprintln(output, "config: valid")
+	fmt.Fprintf(output, "config-path: %s\n", path)
+	fmt.Fprintf(output, "daily-proxy-source: %s\n", configured(providerConfigured))
+	fmt.Fprintf(output, "daily-proxy-cache: %s\n", configured(providerCacheAvailable))
+	fmt.Fprintf(output, "tailnet: %s\n", enabled(cfg.Tailscale.Enabled))
+	fmt.Fprintf(output, "tailnet-auth: %s\n", configured(authConfigured))
+	fmt.Fprintf(output, "wireguard-configs: %d/%d available\n", wireGuardAvailable, len(cfg.WireGuard.Configs))
+	fmt.Fprintf(output, "tailnet-inbound-forwards: %d\n", len(cfg.Tailscale.InboundForwards))
+	fmt.Fprintf(output, "direct-only: %s\n", enabled(cfg.Setup.AllowDirectOnly))
+
+	var problems []string
+	if !dailyProxyOK {
+		problems = append(problems, "daily proxy source and cache are both missing")
+	}
+	if !tailnetAuthOK {
+		problems = append(problems, "Tailnet is enabled but no auth key is configured")
+	}
+	if !wireGuardOK {
+		problems = append(problems, "one or more WireGuard config files are missing or empty")
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("configuration is incomplete: %s", strings.Join(problems, "; "))
+	}
+	fmt.Fprintln(output, "result: ready")
+	return nil
+}
+
+func fileHasContent(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Size() > 0
+}
+
+func configured(value bool) string {
+	if value {
+		return "configured"
+	}
+	return "missing"
+}
+
+func enabled(value bool) string {
+	if value {
+		return "enabled"
+	}
+	return "disabled"
+}
+
 func runSupervisor(args []string) error {
 	readyPath := optionValue(args, "ready")
 	profile := optionValue(args, "profile")
@@ -541,6 +632,7 @@ func usage() {
 
 Usage:
   meshmux init [-force]
+  meshmux config-check [-config path]
   meshmux generate [target|all] [-config path]
   meshmux publish <publish-target> [-config path]
   meshmux download mihomo|dashboard|all [-config path]

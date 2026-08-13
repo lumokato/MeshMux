@@ -88,6 +88,7 @@ func TestLinuxConfigAPIPreservesTUNChoice(t *testing.T) {
 		t.Run(requestKind, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "meshmux.local.json")
 			chosen := config.Config{Name: "linux-tun-save"}
+			chosen.Setup.AllowDirectOnly = true
 			chosen.TUN = config.TUN{
 				Enabled:             true,
 				Stack:               "mixed",
@@ -170,7 +171,7 @@ func TestTUNStatusUsesPlatformRuntimeEvidence(t *testing.T) {
 	}
 }
 
-func TestTailnetStatusSaysRuntimeNeedsVerification(t *testing.T) {
+func TestTailnetStatusSaysRuntimeNeedsVerificationWithoutEvidence(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Tailscale.Enabled = true
 	cfg.Tailscale.AuthKey = "not-a-real-key"
@@ -185,6 +186,64 @@ func TestTailnetStatusSaysRuntimeNeedsVerification(t *testing.T) {
 		return
 	}
 	t.Fatal("Tailnet status item missing")
+}
+
+func TestTailnetStateValid(t *testing.T) {
+	dir := t.TempDir()
+	if tailnetStateValid(dir) {
+		t.Fatal("missing state reported valid")
+	}
+	data := []byte(`{"_machinekey":"machine","_current-profile":"current","_profiles":"profiles"}`)
+	if err := os.WriteFile(filepath.Join(dir, "tailscaled.state"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !tailnetStateValid(dir) {
+		t.Fatal("complete state reported invalid")
+	}
+}
+
+func TestRecentTailnetFailureRequiresRepeatedRecentErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mihomo.out.log")
+	now := time.Date(2026, 8, 13, 15, 0, 0, 0, time.FixedZone("HKT", 8*60*60))
+	lines := ""
+	for second := 1; second <= 3; second++ {
+		lines += now.Add(time.Duration(-second)*time.Second).Format(`time="2006-01-02T15:04:05.999999999Z07:00"`) + ` level=warning msg="[TCP] dial TS error: context deadline exceeded"` + "\n"
+	}
+	if err := os.WriteFile(path, []byte(lines), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := recentTailnetFailure(path, now); got != "近期 Tailnet 请求持续失败" {
+		t.Fatalf("recent failure = %q", got)
+	}
+	if got := recentTailnetFailure(path, now.Add(3*time.Minute)); got != "" {
+		t.Fatalf("stale failure = %q", got)
+	}
+}
+
+func TestRecentTailnetFailureReportsNoState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mihomo.out.log")
+	now := time.Now()
+	line := now.Format(`time="2006-01-02T15:04:05.999999999Z07:00"`) + ` msg="Authkey is set; but state is NoState"`
+	if err := os.WriteFile(path, []byte(line), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := recentTailnetFailure(path, now); got != "Tailnet 身份状态未加载" {
+		t.Fatalf("NoState failure = %q", got)
+	}
+}
+
+func TestRecentTailnetEvidencePrefersNewerSuccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mihomo.out.log")
+	now := time.Now()
+	lines := now.Add(-time.Second).Format(`time="2006-01-02T15:04:05.999999999Z07:00"`) + ` msg="Authkey is set; but state is NoState"` + "\n" +
+		now.Format(`time="2006-01-02T15:04:05.999999999Z07:00"`) + ` msg="vault.ops.lumokato.com using TS[Tailnet]"`
+	if err := os.WriteFile(path, []byte(lines), 0600); err != nil {
+		t.Fatal(err)
+	}
+	evidence := recentTailnetEvidence(path, now)
+	if !evidence.connected || evidence.detail != "" {
+		t.Fatalf("Tailnet evidence = %+v", evidence)
+	}
 }
 
 func TestPlatformActionPolicy(t *testing.T) {
@@ -308,6 +367,7 @@ func TestImportWireGuardAPIAcceptsMultipleConfigs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "meshmux.local.json")
 	initial := config.Config{Name: "wg"}
+	initial.Setup.AllowDirectOnly = true
 	data, err := json.Marshal(initial)
 	if err != nil {
 		t.Fatal(err)
@@ -362,6 +422,7 @@ func TestConfigAPIAcceptsStructuredConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "meshmux.local.json")
 	initial := config.Config{Name: "before"}
+	initial.Setup.AllowDirectOnly = true
 	data, err := json.Marshal(initial)
 	if err != nil {
 		t.Fatal(err)
@@ -391,6 +452,7 @@ func TestConfigAPIAcceptsStructuredConfig(t *testing.T) {
 	}
 
 	updated := config.Config{Name: "after"}
+	updated.Setup.AllowDirectOnly = true
 	updated.Ports.Mixed = 2081
 	body, err := json.Marshal(map[string]any{"config": updated})
 	if err != nil {
@@ -415,6 +477,23 @@ func TestConfigAPIAcceptsStructuredConfig(t *testing.T) {
 	}
 	if got.Name != "after" || got.Ports.Mixed != 2081 {
 		t.Fatalf("written config = %+v", got)
+	}
+}
+
+func TestConfigAPIRejectsSilentDirectOnlyFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meshmux.local.json")
+	requestBody, err := json.Marshal(map[string]any{"config": config.Config{Name: "empty"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(requestBody))
+	response := httptest.NewRecorder()
+	(&Server{ConfigPath: path}).configAPIFor("windows", response, req)
+	if response.Code == http.StatusOK || !strings.Contains(response.Body.String(), "missing daily proxy provider") {
+		t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("invalid config was written: %v", err)
 	}
 }
 

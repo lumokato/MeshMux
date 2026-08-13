@@ -195,6 +195,30 @@ func Running() bool {
 	return err == nil && status.State == svc.Running
 }
 
+func AutostartEnabled() bool {
+	manager, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseServiceHandle(manager)
+	handle, err := windows.OpenService(manager, syscall.StringToUTF16Ptr(Name), windows.SERVICE_QUERY_CONFIG)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseServiceHandle(handle)
+	var needed uint32
+	err = windows.QueryServiceConfig(handle, nil, 0, &needed)
+	if err != nil && !errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) {
+		return false
+	}
+	buffer := make([]byte, needed)
+	current := (*windows.QUERY_SERVICE_CONFIG)(unsafe.Pointer(&buffer[0]))
+	if err := windows.QueryServiceConfig(handle, current, needed, &needed); err != nil {
+		return false
+	}
+	return current.StartType == windows.SERVICE_AUTO_START
+}
+
 func DataDir() string {
 	root := strings.TrimSpace(os.Getenv("ProgramData"))
 	if root == "" {
@@ -226,7 +250,7 @@ func SecureDataDir(path string) error {
 }
 
 func RunElevated(action, configPath string) error {
-	if action != "start" && action != "stop" && action != "restart" {
+	if action != "start" && action != "stop" && action != "restart" && action != "activate" {
 		return fmt.Errorf("unsupported service action %q", action)
 	}
 	executable, err := os.Executable()
@@ -237,12 +261,28 @@ func RunElevated(action, configPath string) error {
 	if _, err := os.Stat(cli); err != nil {
 		return fmt.Errorf("find service controller: %w", err)
 	}
+	resultFile, err := os.CreateTemp("", "meshmux-service-result-*")
+	if err != nil {
+		return err
+	}
+	resultPath := resultFile.Name()
+	if _, err := resultFile.WriteString("pending\n"); err != nil {
+		_ = resultFile.Close()
+		_ = os.Remove(resultPath)
+		return err
+	}
+	if err := resultFile.Close(); err != nil {
+		_ = os.Remove(resultPath)
+		return err
+	}
+	defer os.Remove(resultPath)
 	verb, _ := syscall.UTF16PtrFromString("runas")
 	file, _ := syscall.UTF16PtrFromString(cli)
 	paramsText := "service " + action
 	if action != "stop" && strings.TrimSpace(configPath) != "" {
 		paramsText += " -config " + syscall.EscapeArg(configPath)
 	}
+	paramsText += " -result " + syscall.EscapeArg(resultPath)
 	params, _ := syscall.UTF16PtrFromString(paramsText)
 	cwd, _ := syscall.UTF16PtrFromString(filepath.Dir(cli))
 	if err := windows.ShellExecute(0, verb, file, params, cwd, windows.SW_HIDE); err != nil {
@@ -251,7 +291,21 @@ func RunElevated(action, configPath string) error {
 		}
 		return err
 	}
-	return nil
+	deadline := time.Now().Add(75 * time.Second)
+	for time.Now().Before(deadline) {
+		data, readErr := os.ReadFile(resultPath)
+		if readErr == nil {
+			result := strings.TrimSpace(string(data))
+			switch {
+			case result == "ok":
+				return nil
+			case strings.HasPrefix(result, "error:"):
+				return errors.New(strings.TrimSpace(strings.TrimPrefix(result, "error:")))
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return errors.New("管理员服务操作在 75 秒内没有返回结果")
 }
 
 func queryStatus() (svc.Status, error) {

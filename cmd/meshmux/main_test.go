@@ -52,6 +52,100 @@ func TestStopLoadsConfigAndEntersRuntimeDirectory(t *testing.T) {
 	}
 }
 
+func TestConfigCheckReportsCompletenessWithoutSecrets(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("MESHMUX_HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, "providers"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "wireguard"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "providers", "main.yaml"), []byte("proxies:\n  - name: node\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "wireguard", "home.conf"), []byte("private material"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	const providerSecret = "https://secret.example/subscription"
+	const authSecret = "tskey-auth-secret"
+	cfg := config.Config{
+		Setup:     config.Setup{ProviderURL: providerSecret},
+		WireGuard: config.WireGuard{Configs: []string{filepath.Join("wireguard", "home.conf")}},
+		Tailscale: config.Tailscale{
+			Enabled: true,
+			AuthKey: authSecret,
+			InboundForwards: []config.InboundForward{{
+				Name: "rdp", Network: "tcp", ListenPort: 3389, Target: "127.0.0.1:3389",
+			}},
+		},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, config.DefaultConfigPath)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	var output bytes.Buffer
+	if err := checkConfig([]string{"-config", path}, &output); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{
+		"daily-proxy-source: configured",
+		"daily-proxy-cache: configured",
+		"tailnet: enabled",
+		"tailnet-auth: configured",
+		"wireguard-configs: 1/1 available",
+		"tailnet-inbound-forwards: 1",
+		"direct-only: disabled",
+		"result: ready",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("config-check output missing %q: %s", want, text)
+		}
+	}
+	for _, secret := range []string{providerSecret, authSecret, "private material"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("config-check leaked secret %q: %s", secret, text)
+		}
+	}
+}
+
+func TestConfigCheckRejectsMissingDailyProxyAndTailnetAuth(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("MESHMUX_HOME", home)
+	path := filepath.Join(home, config.DefaultConfigPath)
+	if err := os.WriteFile(path, []byte(`{"tailscale":{"enabled":true}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	var output bytes.Buffer
+	err = checkConfig([]string{"-config", path}, &output)
+	if err == nil || !strings.Contains(err.Error(), "daily proxy") || !strings.Contains(err.Error(), "auth key") {
+		t.Fatalf("config-check error = %v", err)
+	}
+	if strings.Contains(output.String(), "result: ready") {
+		t.Fatalf("incomplete config reported ready: %s", output.String())
+	}
+}
+
 func TestServeHeadlessContextPrintsTokenURLAndShutsDown(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("MESHMUX_HOME", home)

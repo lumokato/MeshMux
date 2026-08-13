@@ -16,6 +16,7 @@ type trayCapabilities struct {
 
 type trayState struct {
 	CoreRunning      bool
+	CoreDegraded     bool
 	SystemProxyOn    bool
 	AutostartEnabled bool
 }
@@ -182,7 +183,10 @@ func refreshAfterAction() {
 func refreshMenuState() error {
 	state, err := backend.State()
 	if mCore != nil {
-		if state.CoreRunning {
+		if state.CoreRunning && state.CoreDegraded {
+			mCore.Check()
+			mCore.SetTitle("核心运行：服务异常")
+		} else if state.CoreRunning {
 			mCore.Check()
 			mCore.SetTitle("核心运行：开")
 		} else {

@@ -40,13 +40,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "{#SourceDir}\MeshMux.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\meshmux-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\bin\mihomo.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#SourceDir}\bin\mihomo.exe"; DestDir: "{userappdata}\MeshMux\bin"; Flags: ignoreversion onlyifdoesntexist uninsneveruninstall
+Source: "{#SourceDir}\bin\mihomo.exe"; DestDir: "{localappdata}\MeshMux\bin"; Flags: ignoreversion onlyifdoesntexist uninsneveruninstall
 Source: "{#SourceDir}\bin\geoip.metadb"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#SourceDir}\bin\geoip.metadb"; DestDir: "{userappdata}\MeshMux"; Flags: ignoreversion uninsneveruninstall
+Source: "{#SourceDir}\bin\geoip.metadb"; DestDir: "{localappdata}\MeshMux"; Flags: ignoreversion uninsneveruninstall
 Source: "{#SourceDir}\dashboard\*"; DestDir: "{app}\dashboard"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SourceDir}\dashboard\*"; DestDir: "{userappdata}\MeshMux\dashboard"; Flags: ignoreversion recursesubdirs createallsubdirs uninsneveruninstall
+Source: "{#SourceDir}\dashboard\*"; DestDir: "{localappdata}\MeshMux\dashboard"; Flags: ignoreversion recursesubdirs createallsubdirs uninsneveruninstall
 Source: "{#SourceDir}\meshmux.example.json"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourceDir}\meshmux.example.json"; DestDir: "{userappdata}\MeshMux"; DestName: "meshmux.local.json"; Flags: ignoreversion onlyifdoesntexist uninsneveruninstall
+Source: "{#SourceDir}\meshmux.example.json"; DestDir: "{localappdata}\MeshMux"; DestName: "meshmux.local.json"; Flags: ignoreversion onlyifdoesntexist uninsneveruninstall
 Source: "{#SourceDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\SECURITY.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
@@ -71,12 +71,19 @@ Filename: "{app}\meshmux-cli.exe"; Parameters: "service remove"; Flags: runhidde
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
+  StatusCode: Integer;
   ServiceCLI: String;
 begin
   Result := '';
   ServiceCLI := ExpandConstant('{app}\meshmux-cli.exe');
-  if FileExists(ServiceCLI) then
-    Exec(ServiceCLI, 'service stop', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if FileExists(ServiceCLI) and
+     Exec(ServiceCLI, 'service status', '', SW_HIDE, ewWaitUntilTerminated, StatusCode) and
+     (StatusCode = 0) then
+  begin
+    if (not Exec(ServiceCLI, 'service stop', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or
+       (ResultCode <> 0) then
+      Result := Format('MeshMux Core could not be stopped (exit code %d). Installation was not changed.', [ResultCode]);
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -91,9 +98,9 @@ begin
   Exec(ExpandConstant('{cmd}'), '/c taskkill /IM MeshMux.exe /F >nul 2>&1', '', SW_HIDE,
     ewWaitUntilTerminated, ResultCode);
   ServiceCLI := ExpandConstant('{app}\meshmux-cli.exe');
-  UserConfig := ExpandConstant('{userappdata}\MeshMux\meshmux.local.json');
+  UserConfig := ExpandConstant('{localappdata}\MeshMux\meshmux.local.json');
   ResultCode := -1;
-  if (not Exec(ServiceCLI, 'service activate -config "' + UserConfig + '"', '', SW_HIDE,
+  if (not Exec(ServiceCLI, 'service activate-if-ready -config "' + UserConfig + '"', '', SW_HIDE,
     ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
     RaiseException(Format('MeshMux service activation failed (exit code %d). See %%LocalAppData%%\MeshMux\logs\service-command.log.', [ResultCode]));
 end;

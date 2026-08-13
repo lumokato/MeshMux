@@ -2,6 +2,7 @@
   "name": "default",
   "setup": {
     "providerUrl": "",
+    "allowDirectOnly": false,
     "subStoreUrl": "",
     "subStoreBackend": "",
     "subStoreFileName": ""

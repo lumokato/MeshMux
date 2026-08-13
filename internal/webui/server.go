@@ -144,8 +144,12 @@ func buildStatusFor(goos string, cfg *config.Config) statusPayload {
 	pid, managedCoreRunning := runner.PID(cfg)
 	if managedCoreRunning {
 		add("核心进程", "运行中", "ok", "PID "+strconv.Itoa(pid))
-	} else if goos == "windows" && winservice.Running() && controllerReady {
-		add("核心进程", "运行中", "ok", "Windows 服务运行中")
+	} else if goos == "windows" && winservice.Running() {
+		if controllerReady {
+			add("核心进程", "运行中", "ok", "Windows 服务运行中")
+		} else {
+			add("核心进程", "服务异常", "err", "Windows 服务运行，但控制接口不可用")
+		}
 	} else if goos == "linux" && controllerReady {
 		add("核心进程", "运行中", "ok", "控制接口实时可用")
 	} else {
@@ -158,7 +162,7 @@ func buildStatusFor(goos string, cfg *config.Config) statusPayload {
 	} else {
 		add("系统代理", "关闭", "muted", "")
 	}
-	if runner.AutostartEnabled() {
+	if (goos == "windows" && winservice.AutostartEnabled()) || runner.AutostartEnabled() {
 		add("开机自启", "开启", "ok", "")
 	} else {
 		add("开机自启", "关闭", "muted", "")
@@ -180,8 +184,15 @@ func buildStatusFor(goos string, cfg *config.Config) statusPayload {
 		add("订阅", "未配置", "warn", "")
 	}
 	if cfg.Tailscale.Enabled {
-		if runtimeTailnetAlive(cfg) {
+		tailnet := runtimeTailnetStatus(goos, cfg)
+		if tailnet.connected {
 			add("Tailnet", "已连接", "ok", fmt.Sprintf("%d 条路由，%d 个入站转发", len(cfg.Tailscale.Routes)+len(cfg.Tailscale.IPv6Routes), len(cfg.Tailscale.InboundForwards)))
+		} else if tailnet.detail != "" {
+			if strings.HasPrefix(tailnet.detail, "近期") {
+				add("Tailnet", "路径异常", "warn", tailnet.detail)
+			} else {
+				add("Tailnet", "连接异常", "err", tailnet.detail)
+			}
 		} else if cfg.Tailscale.AuthKey != "" || cfg.Tailscale.AuthKeyFile != "" {
 			add("Tailnet", "已配置，运行态需验证", "warn", fmt.Sprintf("%d 条路由，%d 个入站转发", len(cfg.Tailscale.Routes)+len(cfg.Tailscale.IPv6Routes), len(cfg.Tailscale.InboundForwards)))
 		} else {
@@ -241,23 +252,125 @@ func runtimeTUNEnabled(cfg *config.Config) bool {
 	return current.TUN.Enable
 }
 
-func runtimeTailnetAlive(cfg *config.Config) bool {
+type tailnetRuntimeStatus struct {
+	connected bool
+	detail    string
+}
+
+func runtimeTailnetStatus(goos string, cfg *config.Config) tailnetRuntimeStatus {
+	stateDir := filepath.Join("state", "tailscale")
+	logPath := filepath.Join("logs", "mihomo.out.log")
+	if goos == "windows" && winservice.Installed() {
+		serviceHome := winservice.DataDir()
+		stateDir = filepath.Join(serviceHome, "state", "tailscale")
+		logPath = filepath.Join(serviceHome, "logs", "mihomo.out.log")
+	}
 	client := &http.Client{Timeout: 700 * time.Millisecond}
 	resp, err := client.Get("http://" + cfg.Ports.Controller + "/proxies/Tailnet")
 	if err != nil {
-		return false
+		return tailnetRuntimeStatus{}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return false
+		return tailnetRuntimeStatus{}
 	}
 	var proxy struct {
 		Alive bool `json:"alive"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&proxy); err != nil {
+		return tailnetRuntimeStatus{detail: "Tailnet 运行态响应无效"}
+	}
+	if !proxy.Alive {
+		return tailnetRuntimeStatus{detail: "Tailnet 代理未就绪"}
+	}
+	evidence := recentTailnetEvidence(logPath, time.Now())
+	if evidence.connected {
+		return tailnetRuntimeStatus{connected: true}
+	}
+	if evidence.detail != "" {
+		return evidence
+	}
+	if tailnetStateValid(stateDir) {
+		return tailnetRuntimeStatus{connected: true}
+	}
+	return tailnetRuntimeStatus{}
+}
+
+func recentTailnetEvidence(path string, now time.Time) tailnetRuntimeStatus {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return tailnetRuntimeStatus{}
+	}
+	const maxTail = 256 << 10
+	if len(data) > maxTail {
+		data = data[len(data)-maxTail:]
+	}
+	lines := strings.Split(string(data), "\n")
+	cutoff := now.Add(-2 * time.Minute)
+	consecutive := 0
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := lines[index]
+		if timestamp, ok := logTimestamp(line); ok && timestamp.Before(cutoff) {
+			break
+		}
+		if strings.Contains(line, "using TS[Tailnet]") {
+			return tailnetRuntimeStatus{connected: true}
+		}
+		if strings.Contains(line, "Authkey is set; but state is NoState") {
+			return tailnetRuntimeStatus{detail: "Tailnet 身份状态未加载"}
+		}
+		if strings.Contains(line, "Start inbound forwards for proxy [Tailnet] failed") {
+			return tailnetRuntimeStatus{detail: "Tailnet 入站启动失败"}
+		}
+		if strings.Contains(line, "dial TS") && (strings.Contains(line, "context deadline exceeded") || strings.Contains(line, "invalid Listen addr")) {
+			consecutive++
+			if consecutive >= 3 {
+				return tailnetRuntimeStatus{detail: "近期 Tailnet 请求持续失败"}
+			}
+		}
+	}
+	return tailnetRuntimeStatus{}
+}
+
+func recentTailnetFailure(path string, now time.Time) string {
+	evidence := recentTailnetEvidence(path, now)
+	if evidence.connected {
+		return ""
+	}
+	return evidence.detail
+}
+
+func tailnetStateValid(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
+	if err != nil || len(data) == 0 {
 		return false
 	}
-	return proxy.Alive
+	var state map[string]json.RawMessage
+	if json.Unmarshal(data, &state) != nil {
+		return false
+	}
+	for _, key := range []string{"_machinekey", "_current-profile", "_profiles"} {
+		value, ok := state[key]
+		if !ok || len(value) == 0 || string(value) == `""` || string(value) == "null" {
+			return false
+		}
+	}
+	return true
+}
+
+func logTimestamp(line string) (time.Time, bool) {
+	const marker = `time="`
+	start := strings.Index(line, marker)
+	if start < 0 {
+		return time.Time{}, false
+	}
+	start += len(marker)
+	end := strings.Index(line[start:], `"`)
+	if end < 0 {
+		return time.Time{}, false
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, line[start:start+end])
+	return parsed, err == nil
 }
 
 func tcpReady(addr string) bool {
@@ -464,7 +577,6 @@ func (s *Server) configAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		content := req.Content
 		if req.Config != nil {
 			path := s.ConfigPath
 			if path == "" {
@@ -476,7 +588,7 @@ func (s *Server) configAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 				return
 			}
 			if err := saveConfig(path, req.Config); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			writeJSON(w, map[string]any{"ok": true, "path": path})
@@ -492,16 +604,17 @@ func (s *Server) configAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-		}
-		path := s.ConfigPath
-		if path == "" {
-			path = config.DefaultConfigPath
-		}
-		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			path := s.ConfigPath
+			if path == "" {
+				path = config.DefaultConfigPath
+			}
+			if err := saveConfig(path, &parsed); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true, "path": path})
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true, "path": path})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -606,12 +719,16 @@ func (s *Server) actionAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 			message = "已生成: " + path
 		}
 	case "start":
-		if goos == "windows" && winservice.Installed() {
-			if err := winservice.RunElevated("restart", s.ConfigPath); err != nil {
+		if goos == "windows" {
+			action := "activate"
+			if winservice.Installed() {
+				action = "restart"
+			}
+			if err := winservice.RunElevated(action, s.ConfigPath); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			message = "已请求重启核心服务"
+			message = "核心服务已启动"
 			break
 		}
 		target := req.Target
@@ -732,10 +849,8 @@ func saveConfig(path string, cfg *config.Config) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	if strings.TrimSpace(cfg.Setup.ProviderURL) != "" {
-		if err := generator.RefreshProviders(cfg); err != nil {
-			return err
-		}
+	if err := generator.RefreshProviders(cfg); err != nil {
+		return err
 	}
 	stored := cfg.StorageCopy()
 	data, err := json.MarshalIndent(stored, "", "  ")
@@ -931,6 +1046,7 @@ const indexHTML = `<!doctype html>
               <span>启用 Tailnet 时填写；不填则只生成普通代理配置。</span>
             </label>
           </div>
+          <label class="switch"><input id="allowDirectOnly" type="checkbox">仅直连模式（不使用日常代理订阅）</label>
           <label class="switch"><input id="tsEnabled" type="checkbox">启用 Tailnet 出站</label>
           <div class="actions">
             <button class="primary" onclick="saveQuick()">保存</button>
@@ -1061,6 +1177,7 @@ const indexHTML = `<!doctype html>
     function fill(){
       ensure(cfg); deriveSetup(cfg);
       setVal('providerUrl', cfg.setup.providerUrl || '');
+      el('allowDirectOnly').checked = !!cfg.setup.allowDirectOnly;
       setVal('subStoreUrl', cfg.setup.subStoreUrl || '');
       setVal('subStoreBackend', cfg.setup.subStoreBackend || '');
       el('tsEnabled').checked = !!cfg.tailscale.enabled;
@@ -1078,6 +1195,7 @@ const indexHTML = `<!doctype html>
     function collect(){
       ensure(cfg);
       cfg.setup.providerUrl = val('providerUrl');
+      cfg.setup.allowDirectOnly = el('allowDirectOnly').checked;
       cfg.setup.subStoreUrl = val('subStoreUrl').replace(/\/+$/, '') + (val('subStoreUrl') ? '/' : '');
       cfg.setup.subStoreBackend = val('subStoreBackend').replace(/^\/+|\/+$/g, '');
       cfg.setup.subStoreFileName ||= (cfg.publish.find(p => p.type === 'substore-files') || {}).fileName || '';

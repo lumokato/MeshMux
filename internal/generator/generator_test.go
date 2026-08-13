@@ -1,11 +1,58 @@
 package generator
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/meshmux/meshmux/internal/config"
 )
+
+func TestProviderCacheRequiredUnlessDirectOnlyIsExplicit(t *testing.T) {
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	cfg := &config.Config{Providers: []config.Provider{{Name: "main", Path: filepath.Join("providers", "main.yaml")}}}
+	if err := ensureProviderCaches(cfg); err == nil || !IsMissingProviderError(err) {
+		t.Fatalf("missing provider error = %v", err)
+	}
+	cfg.Setup.AllowDirectOnly = true
+	if err := ensureProviderCaches(cfg); err != nil {
+		t.Fatalf("explicit direct-only mode rejected derived empty provider: %v", err)
+	}
+	cfg.Providers = nil
+	if err := ensureProviderCaches(cfg); err != nil {
+		t.Fatalf("explicit direct-only mode rejected: %v", err)
+	}
+}
+
+func TestProviderCacheAllowsMissingURLWhenNodesExist(t *testing.T) {
+	old, _ := os.Getwd()
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+	path := filepath.Join("providers", "main.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("proxies:\n  - name: node-a\n    type: ss\n    server: example.test\n    port: 443\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Providers: []config.Provider{{Name: "main", Path: path}}}
+	if err := ensureProviderCaches(cfg); err != nil {
+		t.Fatalf("valid cache rejected: %v", err)
+	}
+}
 
 func TestNormalizeProviderDataExtractsProxiesBlock(t *testing.T) {
 	input := []byte(`mixed-port: 7890

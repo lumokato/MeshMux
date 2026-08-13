@@ -2,6 +2,7 @@ package generator
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,12 @@ import (
 
 	"github.com/meshmux/meshmux/internal/config"
 )
+
+var errMissingProvider = errors.New("missing daily proxy provider")
+
+func IsMissingProviderError(err error) bool {
+	return errors.Is(err, errMissingProvider)
+}
 
 func GenerateAll(cfg *config.Config) ([]string, error) {
 	var written []string
@@ -57,10 +64,13 @@ func GenerateTarget(cfg *config.Config, target config.Target) (string, error) {
 }
 
 func ensureProviderCaches(cfg *config.Config) error {
+	configured := 0
+	available := 0
 	for _, provider := range cfg.Providers {
 		if strings.TrimSpace(provider.Name) == "" {
 			continue
 		}
+		configured++
 		path := providerCachePath(provider)
 		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
 			normalized, normalizeErr := normalizeProviderData(data)
@@ -68,11 +78,15 @@ func ensureProviderCaches(cfg *config.Config) error {
 				if err := os.WriteFile(path, normalized, 0600); err != nil {
 					return err
 				}
+				available++
 				continue
 			}
 		}
 		if strings.TrimSpace(provider.URL) == "" {
-			continue
+			if cfg.Setup.AllowDirectOnly {
+				continue
+			}
+			return fmt.Errorf("%w: 日常代理订阅 %q 缺少链接，且缓存 %s 不存在或无有效节点", errMissingProvider, provider.Name, path)
 		}
 		data, err := fetchProvider(provider.URL)
 		if err != nil {
@@ -88,6 +102,10 @@ func ensureProviderCaches(cfg *config.Config) error {
 		if err := os.WriteFile(path, normalized, 0600); err != nil {
 			return err
 		}
+		available++
+	}
+	if (configured == 0 || available == 0) && !cfg.Setup.AllowDirectOnly {
+		return fmt.Errorf("%w: 未配置可用的日常代理订阅；如确实只需直连，请明确启用仅直连模式", errMissingProvider)
 	}
 	return nil
 }

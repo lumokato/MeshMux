@@ -37,6 +37,11 @@ func runWindowsService(args []string) error {
 	if err := os.Chdir(home); err != nil {
 		return err
 	}
+	if cfg, _, err := load(configArgs(configPath)); err == nil && tailnetNeedsForcedLogin(cfg, home) {
+		if err := os.Setenv("TSNET_FORCE_LOGIN", "1"); err != nil {
+			return err
+		}
+	}
 	return svc.Run(winservice.Name, &serviceHandler{configPath: configPath})
 }
 
@@ -113,17 +118,21 @@ var runServiceCore = func(ctx context.Context, cfg *config.Config, profile strin
 }
 
 var (
-	installWindowsService = winservice.Install
-	controlWindowsService = winservice.Control
-	stopUserCore          = runner.Stop
-	startUserCore         = startDetached
-	verifyWindowsService  = waitForWindowsService
+	installWindowsService   = winservice.Install
+	controlWindowsService   = winservice.Control
+	windowsServiceRunning   = winservice.Running
+	windowsServiceInstalled = winservice.Installed
+	stopUserCore            = runner.Stop
+	startUserCore           = startDetached
+	verifyWindowsService    = waitForWindowsService
+	prepareWindowsSnapshot  = prepareServiceSnapshot
 )
 
 func manageWindowsService(args []string) error {
 	fs := flag.NewFlagSet("service", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	configPath := fs.String("config", "", "configuration path")
+	_ = fs.String("result", "", "command result path")
 	action := commandArg(args, "status")
 	filtered := removeCommandArg(args, action)
 	if err := fs.Parse(filtered); err != nil {
@@ -132,18 +141,26 @@ func manageWindowsService(args []string) error {
 	action = strings.ToLower(strings.TrimSpace(action))
 
 	switch action {
-	case "install", "activate":
+	case "install", "activate", "activate-if-ready":
 		path, err := filepath.Abs(strings.TrimSpace(*configPath))
 		if err != nil || strings.TrimSpace(*configPath) == "" {
 			return fmt.Errorf("service %s requires an absolute config path", action)
 		}
-		snapshotPath, err := prepareServiceSnapshot(path)
-		if err != nil {
-			return err
-		}
 		executable, err := os.Executable()
 		if err != nil {
 			return err
+		}
+		path, err = config.EnsureCanonicalConfig(
+			path,
+			filepath.Join(filepath.Dir(executable), "meshmux.example.json"),
+			filepath.Join(winservice.DataDir(), config.DefaultConfigPath),
+		)
+		if err != nil {
+			return err
+		}
+		snapshotPath, err := prepareServiceSnapshotFiles(path)
+		if err != nil {
+			return handleSnapshotPreparationError(action, err)
 		}
 		if err := installWindowsService(executable, snapshotPath); err != nil {
 			return err
@@ -155,19 +172,13 @@ func manageWindowsService(args []string) error {
 	case "remove":
 		return winservice.Remove()
 	case "start", "stop", "restart":
-		if action != "stop" && strings.TrimSpace(*configPath) != "" {
-			legacyConfig, _, err := load(configArgs(*configPath))
-			if err != nil {
-				return err
-			}
-			if err := runner.Stop(legacyConfig); err != nil {
-				return fmt.Errorf("stop existing user core: %w", err)
-			}
-			if _, err := prepareServiceSnapshot(*configPath); err != nil {
-				return err
-			}
+		if action == "stop" {
+			return controlWindowsService("stop", 30*time.Second)
 		}
-		return winservice.Control(action, 30*time.Second)
+		if strings.TrimSpace(*configPath) == "" {
+			return fmt.Errorf("service %s requires an absolute config path", action)
+		}
+		return restartWindowsService(action, *configPath)
 	case "status":
 		status, err := winservice.Status()
 		if err != nil {
@@ -176,8 +187,24 @@ func manageWindowsService(args []string) error {
 		fmt.Println(status)
 		return nil
 	default:
-		return fmt.Errorf("service expects install, activate, remove, start, stop, restart, or status")
+		return fmt.Errorf("service expects install, activate, activate-if-ready, remove, start, stop, restart, or status")
 	}
+}
+
+func handleSnapshotPreparationError(action string, prepareErr error) error {
+	if action != "activate-if-ready" {
+		return prepareErr
+	}
+	if windowsServiceInstalled() {
+		if startErr := controlWindowsService("start", 30*time.Second); startErr != nil {
+			return fmt.Errorf("new config validation failed: %v; previous service could not be restored: %w", prepareErr, startErr)
+		}
+		return fmt.Errorf("new config validation failed: %w; previous service was restored", prepareErr)
+	}
+	if generator.IsMissingProviderError(prepareErr) {
+		return nil
+	}
+	return prepareErr
 }
 
 func activateWindowsService(sourcePath string) error {
@@ -195,6 +222,9 @@ func activateWindowsService(sourcePath string) error {
 	if err := stopUserCore(cfg); err != nil {
 		return fmt.Errorf("stop existing user core: %w", err)
 	}
+	if _, err := prepareWindowsSnapshot(sourcePath); err != nil {
+		return fmt.Errorf("prepare service snapshot: %w", err)
+	}
 	startErr := controlWindowsService("start", 30*time.Second)
 	if startErr == nil {
 		startErr = verifyWindowsService(cfg, 5*time.Second)
@@ -208,6 +238,95 @@ func activateWindowsService(sourcePath string) error {
 		return fmt.Errorf("start service: %v; restore user core: %w", startErr, restoreErr)
 	}
 	return fmt.Errorf("start service: %w; previous user core was restored", startErr)
+}
+
+func restartWindowsService(action, sourcePath string) error {
+	if action == "start" && windowsServiceRunning() {
+		return nil
+	}
+	cfg, _, err := load(configArgs(sourcePath))
+	if err != nil {
+		return err
+	}
+	backup, err := captureServiceSnapshot()
+	if err != nil {
+		return fmt.Errorf("backup service snapshot: %w", err)
+	}
+	if _, err := prepareWindowsSnapshot(sourcePath); err != nil {
+		return fmt.Errorf("prepare service snapshot: %w", err)
+	}
+	if action == "restart" {
+		if err := controlWindowsService("stop", 30*time.Second); err != nil {
+			cause := fmt.Errorf("stop existing service: %w", err)
+			if restoreErr := restoreServiceSnapshot(backup); restoreErr != nil {
+				return fmt.Errorf("%v; restore previous service snapshot: %w", cause, restoreErr)
+			}
+			return cause
+		}
+	}
+	if err := stopUserCore(cfg); err != nil {
+		return restoreStoppedService(backup, fmt.Errorf("stop existing user core: %w", err))
+	}
+	if err := controlWindowsService("start", 30*time.Second); err != nil {
+		return restoreStoppedService(backup, fmt.Errorf("start service: %w", err))
+	}
+	if err := verifyWindowsService(cfg, 5*time.Second); err != nil {
+		_ = controlWindowsService("stop", 15*time.Second)
+		return restoreStoppedService(backup, fmt.Errorf("verify service: %w", err))
+	}
+	return nil
+}
+
+type snapshotFileBackup struct {
+	path   string
+	data   []byte
+	exists bool
+}
+
+func captureServiceSnapshot() ([]snapshotFileBackup, error) {
+	home := winservice.DataDir()
+	paths := []string{
+		filepath.Join(home, config.DefaultConfigPath),
+		filepath.Join(home, "profiles", "windows.yaml"),
+	}
+	backup := make([]snapshotFileBackup, 0, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			backup = append(backup, snapshotFileBackup{path: path})
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		backup = append(backup, snapshotFileBackup{path: path, data: data, exists: true})
+	}
+	return backup, nil
+}
+
+func restoreStoppedService(backup []snapshotFileBackup, cause error) error {
+	if err := restoreServiceSnapshot(backup); err != nil {
+		return fmt.Errorf("%v; restore previous service snapshot: %w", cause, err)
+	}
+	if err := controlWindowsService("start", 30*time.Second); err != nil {
+		return fmt.Errorf("%v; restart previous service snapshot: %w", cause, err)
+	}
+	return fmt.Errorf("%w; previous service snapshot was restored", cause)
+}
+
+func restoreServiceSnapshot(backup []snapshotFileBackup) error {
+	for _, file := range backup {
+		if file.exists {
+			if err := writeSnapshotFile(file.path, file.data); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.Remove(file.path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func waitForWindowsService(cfg *config.Config, timeout time.Duration) error {
@@ -239,7 +358,7 @@ func serviceFailure(configPath, stage string, err error) (bool, uint32) {
 			_ = file.Close()
 		}
 	}
-	return false, 1
+	return true, 1
 }
 
 func writeWindowsCommandError(args []string, err error) {
@@ -262,13 +381,33 @@ func writeWindowsCommandError(args []string, err error) {
 	_, _ = fmt.Fprintf(file, "%s %s: %v\n", time.Now().Format(time.RFC3339), strings.Join(args, " "), err)
 }
 
+func writeWindowsCommandResult(args []string, commandErr error) {
+	path := strings.TrimSpace(optionValue(args, "result"))
+	if path == "" {
+		return
+	}
+	value := "ok\n"
+	if commandErr != nil {
+		value = "error: " + commandErr.Error() + "\n"
+	}
+	_ = writeSnapshotFile(path, []byte(value))
+}
+
 func prepareServiceSnapshot(sourcePath string) (string, error) {
+	return prepareServiceSnapshotFiles(sourcePath)
+}
+
+func prepareServiceSnapshotFiles(sourcePath string) (string, error) {
 	sourcePath, err := filepath.Abs(sourcePath)
 	if err != nil {
 		return "", err
 	}
 	cfg, _, err := load(configArgs(sourcePath))
 	if err != nil {
+		return "", err
+	}
+	dataDir := winservice.DataDir()
+	if err := rejectBootstrapRegression(sourcePath, filepath.Join(dataDir, config.DefaultConfigPath)); err != nil {
 		return "", err
 	}
 	profile, err := generator.GenerateNamed(cfg, "windows")
@@ -279,12 +418,14 @@ func prepareServiceSnapshot(sourcePath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dataDir := winservice.DataDir()
 	if err := winservice.SecureDataDir(dataDir); err != nil {
 		return "", err
 	}
 	profilePath := filepath.Join(dataDir, "profiles", "windows.yaml")
 	if err := writeSnapshotFile(profilePath, profileData); err != nil {
+		return "", err
+	}
+	if err := snapshotReferencedAssets(cfg, dataDir); err != nil {
 		return "", err
 	}
 
@@ -303,6 +444,86 @@ func prepareServiceSnapshot(sourcePath string) (string, error) {
 		return "", err
 	}
 	return snapshotPath, nil
+}
+
+func snapshotReferencedAssets(cfg *config.Config, destinationRoot string) error {
+	paths := make([]string, 0, len(cfg.Providers)+len(cfg.WireGuard.Configs))
+	for _, provider := range cfg.Providers {
+		path := strings.TrimSpace(provider.Path)
+		if path == "" && strings.TrimSpace(provider.Name) != "" {
+			path = filepath.Join("providers", provider.Name+".yaml")
+		}
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	paths = append(paths, cfg.WireGuard.Configs...)
+	for _, path := range paths {
+		cleaned := filepath.Clean(strings.TrimSpace(path))
+		if cleaned == "." || filepath.IsAbs(cleaned) {
+			return fmt.Errorf("service snapshot asset must use a relative path: %s", path)
+		}
+		if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("service snapshot asset escapes the data directory: %s", path)
+		}
+		data, err := os.ReadFile(cleaned)
+		if err != nil {
+			return fmt.Errorf("read service snapshot asset %s: %w", cleaned, err)
+		}
+		if err := writeSnapshotFile(filepath.Join(destinationRoot, cleaned), data); err != nil {
+			return fmt.Errorf("write service snapshot asset %s: %w", cleaned, err)
+		}
+	}
+	return nil
+}
+
+func rejectBootstrapRegression(sourcePath, currentPath string) error {
+	sourceData, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return err
+	}
+	if !config.IsBootstrapConfig(sourceData) {
+		return nil
+	}
+	currentData, err := os.ReadFile(currentPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if config.IsBootstrapConfig(currentData) {
+		return nil
+	}
+	return errors.New("拒绝用安装器空模板覆盖现有 MeshMux 服务配置；请恢复 LocalAppData 中的真实配置后重试")
+}
+
+func tailnetNeedsForcedLogin(cfg *config.Config, home string) bool {
+	if cfg == nil || !cfg.Tailscale.Enabled {
+		return false
+	}
+	if strings.TrimSpace(cfg.Tailscale.AuthKey) == "" && strings.TrimSpace(cfg.Tailscale.AuthKeyFile) == "" {
+		return false
+	}
+	return !validTailnetState(filepath.Join(home, "state", "tailscale"))
+}
+
+func validTailnetState(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	var state map[string]json.RawMessage
+	if json.Unmarshal(data, &state) != nil {
+		return false
+	}
+	for _, key := range []string{"_machinekey", "_current-profile", "_profiles"} {
+		value, ok := state[key]
+		if !ok || len(value) == 0 || string(value) == `""` || string(value) == "null" {
+			return false
+		}
+	}
+	return true
 }
 
 func writeSnapshotFile(path string, data []byte) error {
