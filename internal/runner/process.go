@@ -107,7 +107,7 @@ func expectedMihomoPath(cfg *config.Config) (string, error) {
 	}
 	path := strings.TrimSpace(cfg.Components.Mihomo.Path)
 	if path == "" {
-		path = filepath.Join("bin", "mihomo.exe")
+		path = config.DefaultMihomoPath()
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {

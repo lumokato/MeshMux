@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -15,15 +17,251 @@ import (
 )
 
 func TestIndexHTMLIsChineseFormUI(t *testing.T) {
+	html := renderIndexHTML("windows")
 	for _, want := range []string{"快速设置", "Sub-Store 地址", "后端名", "生成并上传手机配置", "导入 WireGuard 配置", "multiple", "状态概览", "Tailnet 入站转发", "tsInboundForwards"} {
-		if !strings.Contains(indexHTML, want) {
-			t.Fatalf("indexHTML missing %q", want)
+		if !strings.Contains(html, want) {
+			t.Fatalf("rendered HTML missing %q", want)
 		}
 	}
 	for _, private := range []string{"private-backend-name", "/api/files", "TUN 模式通常"} {
-		if strings.Contains(indexHTML, private) {
-			t.Fatalf("indexHTML should not contain %q", private)
+		if strings.Contains(html, private) {
+			t.Fatalf("rendered HTML should not contain %q", private)
 		}
+	}
+}
+
+func TestPlatformUIRendersLinuxRuntimeWithoutSystemProxy(t *testing.T) {
+	html := renderIndexHTML("linux")
+	for _, want := range []string{
+		"Linux 服务器运行",
+		"代理端口（固定）",
+		"const runtimeTarget = 'linux'",
+		"type:'linux-mihomo'",
+		"output:'profiles/linux.yaml'",
+		"linux-ssh,tcp,22,127.0.0.1:22",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("Linux HTML missing %q", want)
+		}
+	}
+	if strings.Contains(html, "saveThen('start','windows')") {
+		t.Fatal("Linux HTML contains hard-coded Windows start target")
+	}
+	if !strings.Contains(html, `<button id="modeTun" onclick="setMode('tun')">TUN</button>`) {
+		t.Fatal("Linux HTML does not expose the TUN mode control")
+	}
+	for _, want := range []string{
+		`class="primary" hidden onclick="saveThen('start',runtimeTarget)"`,
+		`<button hidden onclick="runAction('stop')"`,
+		`<button hidden onclick="runAction('dashboard')"`,
+		`class="hidden" onclick="runAction('proxy-on')"`,
+		`class="hidden" onclick="runAction('proxy-off')"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("Linux HTML does not hide action control %q", want)
+		}
+	}
+}
+
+func TestPlatformUIKeepsWindowsRuntime(t *testing.T) {
+	html := renderIndexHTML("windows")
+	for _, want := range []string{
+		"Windows 运行方式",
+		"const runtimeTarget = 'windows'",
+		"type:'windows-mihomo'",
+		"output:'profiles/windows.yaml'",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("Windows HTML missing %q", want)
+		}
+	}
+	if strings.Contains(html, `class="hidden"`) {
+		t.Fatal("Windows HTML hides system proxy controls")
+	}
+	if strings.Contains(html, ` hidden onclick=`) {
+		t.Fatal("Windows HTML hides runtime action controls")
+	}
+}
+
+func TestLinuxConfigAPIPreservesTUNChoice(t *testing.T) {
+	for _, requestKind := range []string{"config", "content"} {
+		t.Run(requestKind, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "meshmux.local.json")
+			chosen := config.Config{Name: "linux-tun-save"}
+			chosen.TUN = config.TUN{
+				Enabled:             true,
+				Stack:               "mixed",
+				AutoRoute:           true,
+				AutoDetectInterface: true,
+				StrictRoute:         true,
+				DNSHijack:           []string{"any:53", "tcp://any:53"},
+			}
+			var body []byte
+			var err error
+			if requestKind == "config" {
+				body, err = json.Marshal(map[string]any{"config": chosen})
+			} else {
+				content, marshalErr := json.Marshal(chosen)
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
+				body, err = json.Marshal(map[string]string{"content": string(content)})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(body))
+			response := httptest.NewRecorder()
+			(&Server{ConfigPath: path}).configAPIFor("linux", response, req)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+			}
+
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got config.Config
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if !got.TUN.Enabled || !got.TUN.AutoRoute || !got.TUN.AutoDetectInterface || !got.TUN.StrictRoute {
+				t.Fatalf("Linux save changed the selected TUN mode: %+v", got.TUN)
+			}
+			if len(got.TUN.DNSHijack) != 2 || got.TUN.DNSHijack[0] != "any:53" || got.TUN.DNSHijack[1] != "tcp://any:53" {
+				t.Fatalf("Linux save changed DNS hijack = %#v", got.TUN.DNSHijack)
+			}
+		})
+	}
+}
+
+func TestTUNStatusUsesPlatformRuntimeEvidence(t *testing.T) {
+	permissionChecks := 0
+	canStartTUN := func() bool {
+		permissionChecks++
+		return false
+	}
+
+	linux := tunStatusFor("linux", true, true, canStartTUN)
+	if linux.Value != "已启用" || linux.State != "ok" || linux.Detail != "核心实时配置已验证" {
+		t.Fatalf("Linux TUN status = %+v", linux)
+	}
+	if permissionChecks != 0 {
+		t.Fatalf("Linux TUN status checked Web process permissions %d times", permissionChecks)
+	}
+
+	linuxStopped := tunStatusFor("linux", true, false, canStartTUN)
+	if linuxStopped.Value != "已配置，等待重启" || linuxStopped.State != "warn" {
+		t.Fatalf("stopped Linux TUN status = %+v", linuxStopped)
+	}
+	if permissionChecks != 0 {
+		t.Fatalf("stopped Linux TUN status checked Web process permissions %d times", permissionChecks)
+	}
+
+	windows := tunStatusFor("windows", true, true, canStartTUN)
+	if windows.Value != "已启用" || windows.State != "ok" || permissionChecks != 0 {
+		t.Fatalf("Windows TUN status = %+v, permission checks = %d", windows, permissionChecks)
+	}
+
+	windowsStopped := tunStatusFor("windows", true, false, canStartTUN)
+	if windowsStopped.Value != "权限不足" || windowsStopped.State != "err" || permissionChecks != 1 {
+		t.Fatalf("stopped Windows TUN status = %+v, permission checks = %d", windowsStopped, permissionChecks)
+	}
+}
+
+func TestTailnetStatusSaysRuntimeNeedsVerification(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Tailscale.Enabled = true
+	cfg.Tailscale.AuthKey = "not-a-real-key"
+	status := buildStatus(cfg)
+	for _, item := range status.Items {
+		if item.Label != "Tailnet" {
+			continue
+		}
+		if item.Value != "已配置，运行态需验证" || item.State != "warn" {
+			t.Fatalf("Tailnet status = %+v", item)
+		}
+		return
+	}
+	t.Fatal("Tailnet status item missing")
+}
+
+func TestPlatformActionPolicy(t *testing.T) {
+	blocked := []string{"start", "stop", "proxy-on", "proxy-off", "dashboard"}
+	for _, action := range blocked {
+		if platformActionAllowed("linux", action) {
+			t.Errorf("Linux action %q is allowed", action)
+		}
+		if !platformActionAllowed("windows", action) {
+			t.Errorf("Windows action %q is blocked", action)
+		}
+	}
+	for _, action := range []string{"generate", "download-mihomo", "download-dashboard", "probe-substore", "publish-mobile"} {
+		if !platformActionAllowed("linux", action) {
+			t.Errorf("Linux action %q is blocked", action)
+		}
+	}
+}
+
+func TestLinuxActionAPIRejectsRuntimeAndDesktopActions(t *testing.T) {
+	s := &Server{ConfigPath: filepath.Join(t.TempDir(), "missing.json")}
+	for _, action := range []string{"start", "stop", "proxy-on", "proxy-off", "dashboard"} {
+		t.Run(action, func(t *testing.T) {
+			body, err := json.Marshal(map[string]string{"action": action})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/action", bytes.NewReader(body))
+			response := httptest.NewRecorder()
+			s.actionAPIFor("linux", response, req)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+			}
+			if text := response.Body.String(); !strings.Contains(text, action) || !strings.Contains(text, "systemd") {
+				t.Fatalf("response = %q", text)
+			}
+		})
+	}
+}
+
+func TestStartAtAcceptsLoopbackAndRejectsOtherAddresses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meshmux.local.json")
+	if err := os.WriteFile(path, []byte(`{"name":"test"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	server, err := StartAt(path, "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(server.URL, "http://127.0.0.1:") || !strings.Contains(server.URL, "/?token=") {
+		t.Fatalf("server URL = %q", server.URL)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-server.Done(); err != nil {
+		t.Fatalf("serve result = %v", err)
+	}
+
+	for _, address := range []string{"0.0.0.0:9088", "[::]:9088", "localhost:9088", "127.0.0.1"} {
+		t.Run(address, func(t *testing.T) {
+			if _, err := StartAt(path, address); err == nil {
+				t.Fatalf("StartAt(%q) unexpectedly succeeded", address)
+			}
+		})
+	}
+}
+
+func TestPlatformUIForCurrentRuntime(t *testing.T) {
+	want := "windows"
+	if runtime.GOOS == "linux" {
+		want = "linux"
+	}
+	if got := platformUIFor(runtime.GOOS).RuntimeTarget; got != want {
+		t.Fatalf("runtime target = %q, want %q", got, want)
 	}
 }
 

@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -43,19 +44,43 @@ var (
 )
 
 func Start(cfg *config.Config, profile string) error {
-	return runManaged(cfg, profile, false, nil)
+	return runManaged(context.Background(), cfg, profile, false, false, nil)
 }
 
 func Supervise(cfg *config.Config, profile string, ready func(int) error) error {
-	return runManaged(cfg, profile, true, ready)
+	return SuperviseContext(context.Background(), cfg, profile, ready)
 }
 
-func runManaged(cfg *config.Config, profile string, supervise bool, ready func(int) error) error {
+func SuperviseContext(ctx context.Context, cfg *config.Config, profile string, ready func(int) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return runManaged(ctx, cfg, profile, true, false, ready)
+}
+
+func ServiceContext(ctx context.Context, cfg *config.Config, profile string, ready func(int) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return runManaged(ctx, cfg, profile, true, true, ready)
+}
+
+func RunContext(ctx context.Context, cfg *config.Config, profile string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return runManaged(ctx, cfg, profile, true, true, nil)
+}
+
+func runManaged(ctx context.Context, cfg *config.Config, profile string, supervise, failOnExit bool, ready func(int) error) error {
 	if profile == "" {
 		return errors.New("profile path is required")
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if cfg.TUN.Enabled && !canStartTUN() {
-		return errors.New("TUN 模式需要管理员权限；请用管理员身份运行 MeshMux，或关闭 TUN 改用系统代理模式")
+		return errors.New(tunUnavailableMessage())
 	}
 	if err := CleanupResidual(cfg); err != nil {
 		return err
@@ -102,6 +127,8 @@ func runManaged(cfg *config.Config, profile string, supervise bool, ready func(i
 		_ = errLog.Close()
 		done <- err
 	}(process.pid)
+	startupTimer := time.NewTimer(startupProbeDelay)
+	defer startupTimer.Stop()
 	select {
 	case err := <-done:
 		if current, readErr := readPID(); readErr == nil && current == process.pid {
@@ -111,7 +138,9 @@ func runManaged(cfg *config.Config, profile string, supervise bool, ready func(i
 			err = errors.New("process exited")
 		}
 		return fmt.Errorf("mihomo exited immediately: %w%s", err, recentCoreLog())
-	case <-time.After(startupProbeDelay):
+	case <-ctx.Done():
+		return stopAfterCancellation(cfg, done, ctx.Err())
+	case <-startupTimer.C:
 	}
 	if err := postStartNetwork(cfg); err != nil {
 		appendRunnerLog("网络后处理失败: %v", err)
@@ -127,12 +156,39 @@ func runManaged(cfg *config.Config, profile string, supervise bool, ready func(i
 		}
 	}
 	if supervise {
-		<-done
-		if _, ok := PID(cfg); !ok {
-			_ = clearPID()
+		select {
+		case err := <-done:
+			if _, ok := PID(cfg); !ok {
+				_ = clearPID()
+			}
+			if failOnExit {
+				if err == nil {
+					err = errors.New("process exited")
+				}
+				return fmt.Errorf("mihomo exited: %w%s", err, recentCoreLog())
+			}
+		case <-ctx.Done():
+			return stopAfterCancellation(cfg, done, ctx.Err())
 		}
 	}
 	return nil
+}
+
+func stopAfterCancellation(cfg *config.Config, done <-chan error, cause error) error {
+	if err := Stop(cfg); err != nil {
+		return fmt.Errorf("stop mihomo after cancellation: %w", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(stopProcessTimeout):
+	}
+	if _, ok := PID(cfg); !ok {
+		_ = clearPID()
+	}
+	if errors.Is(cause, context.Canceled) {
+		return nil
+	}
+	return cause
 }
 
 func TestConfig(cfg *config.Config, profile string) error {
@@ -372,7 +428,7 @@ func prepareMihomo(cfg *config.Config, syncBundled bool) (string, error) {
 	}
 	target := strings.TrimSpace(cfg.Components.Mihomo.Path)
 	if target == "" {
-		target = filepath.Join("bin", "mihomo.exe")
+		target = config.DefaultMihomoPath()
 	}
 	bundled := bundledMihomoPath()
 	if !syncBundled && shouldManageBundledMihomo(cfg, target) && fileLooksUsable(bundled, minMihomoSize) {
@@ -397,7 +453,7 @@ func shouldManageBundledMihomo(cfg *config.Config, target string) bool {
 	}
 	component := cfg.Components.Mihomo
 	return (component.Repo == "" || component.Repo == config.DefaultMihomoRepo) &&
-		(component.AssetPattern == "" || component.AssetPattern == config.DefaultMihomoAssetPattern)
+		(component.AssetPattern == "" || component.AssetPattern == config.DefaultMihomoAssetPatternFor(runtime.GOOS))
 }
 
 func syncBundledMihomo(bundled, target string) error {
@@ -441,7 +497,7 @@ func MarkMihomoDownloaded(cfg *config.Config) error {
 	}
 	target := strings.TrimSpace(cfg.Components.Mihomo.Path)
 	if target == "" {
-		target = filepath.Join("bin", "mihomo.exe")
+		target = config.DefaultMihomoPath()
 	}
 	if !isDefaultMihomoPath(target) {
 		return nil
@@ -486,7 +542,7 @@ func writeMihomoComponentRecord(source string, hash [sha256.Size]byte) error {
 }
 
 func isDefaultMihomoPath(path string) bool {
-	defaultPath := filepath.Clean(filepath.Join("bin", "mihomo.exe"))
+	defaultPath := filepath.Clean(config.DefaultMihomoPath())
 	cleaned := filepath.Clean(strings.TrimSpace(path))
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(cleaned, defaultPath)
@@ -578,7 +634,8 @@ func copyBundledFile(bundled, target string) error {
 		}
 		return nil
 	}
-	if _, err := os.Stat(bundled); err != nil {
+	info, err := os.Stat(bundled)
+	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
@@ -590,7 +647,11 @@ func copyBundledFile(bundled, target string) error {
 	}
 	defer in.Close()
 	tmp := target + ".part"
-	out, err := os.Create(tmp)
+	mode := info.Mode().Perm()
+	if mode == 0 {
+		mode = 0644
+	}
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
 		return err
 	}
@@ -603,6 +664,10 @@ func copyBundledFile(bundled, target string) error {
 	if closeErr != nil {
 		_ = os.Remove(tmp)
 		return closeErr
+	}
+	if err := os.Chmod(tmp, mode); err != nil {
+		_ = os.Remove(tmp)
+		return err
 	}
 	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
 		_ = os.Remove(tmp)

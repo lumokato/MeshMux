@@ -1,0 +1,27 @@
+[Unit]
+Description=MeshMux loopback configuration UI
+After=meshmux.service
+
+[Service]
+Type=simple
+User=codex
+Group=codex
+WorkingDirectory=/home/codex/.local/share/meshmux
+Environment=MESHMUX_HOME=/home/codex/.local/share/meshmux
+ExecStart=/home/codex/.local/lib/meshmux/meshmux serve -listen 127.0.0.1:9088 -config /home/codex/.config/meshmux/meshmux.local.json -url-file /home/codex/.local/share/meshmux/runtime/web-url
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/codex/.local/share/meshmux /home/codex/.config/meshmux
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+InaccessiblePaths=-/var/run/docker.sock -/run/containerd/containerd.sock -/opt/linesky/lowalt-v2
+
+[Install]
+WantedBy=multi-user.target

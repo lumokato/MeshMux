@@ -2,13 +2,12 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
 	"image"
 	"image/color"
 	"image/png"
 )
 
-func trayIcon() []byte {
+func trayPNG() []byte {
 	const size = 32
 	img := image.NewRGBA(image.Rect(0, 0, size, size))
 	bg := color.RGBA{R: 15, G: 118, B: 110, A: 255}
@@ -33,20 +32,7 @@ func trayIcon() []byte {
 	var pngBuf bytes.Buffer
 	_ = png.Encode(&pngBuf, img)
 
-	var ico bytes.Buffer
-	_ = binary.Write(&ico, binary.LittleEndian, uint16(0))
-	_ = binary.Write(&ico, binary.LittleEndian, uint16(1))
-	_ = binary.Write(&ico, binary.LittleEndian, uint16(1))
-	ico.WriteByte(size)
-	ico.WriteByte(size)
-	ico.WriteByte(0)
-	ico.WriteByte(0)
-	_ = binary.Write(&ico, binary.LittleEndian, uint16(1))
-	_ = binary.Write(&ico, binary.LittleEndian, uint16(32))
-	_ = binary.Write(&ico, binary.LittleEndian, uint32(pngBuf.Len()))
-	_ = binary.Write(&ico, binary.LittleEndian, uint32(22))
-	_, _ = ico.Write(pngBuf.Bytes())
-	return ico.Bytes()
+	return pngBuf.Bytes()
 }
 
 func inRoundedRect(x, y, left, top, width, height, radius int) bool {

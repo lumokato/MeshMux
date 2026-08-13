@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -109,7 +110,7 @@ func TestApplyDefaultsMigratesLegacyMihomoComponent(t *testing.T) {
 	} {
 		t.Run(component.Repo+"/"+component.AssetPattern, func(t *testing.T) {
 			cfg := Config{Components: Components{Mihomo: component}}
-			cfg.ApplyDefaults()
+			cfg.applyDefaults("windows")
 			if cfg.Components.Mihomo.Repo != DefaultMihomoRepo || cfg.Components.Mihomo.ReleaseTag != DefaultMihomoReleaseTag || cfg.Components.Mihomo.AssetPattern != DefaultMihomoAssetPattern {
 				t.Fatalf("mihomo component = %+v", cfg.Components.Mihomo)
 			}
@@ -126,5 +127,107 @@ func TestApplyDefaultsPreservesCustomMihomoComponent(t *testing.T) {
 	cfg.ApplyDefaults()
 	if cfg.Components.Mihomo.Repo != "example/custom-mihomo" || cfg.Components.Mihomo.ReleaseTag != "custom-v1" || cfg.Components.Mihomo.AssetPattern != `custom\.zip$` {
 		t.Fatalf("custom mihomo component changed: %+v", cfg.Components.Mihomo)
+	}
+}
+
+func TestApplyDefaultsUsesPlatformMihomoDefaults(t *testing.T) {
+	testCases := []struct {
+		goos    string
+		path    string
+		pattern string
+	}{
+		{goos: "windows", path: filepath.Join("bin", "mihomo.exe"), pattern: DefaultMihomoAssetPattern},
+		{goos: "linux", path: filepath.Join("bin", "mihomo"), pattern: LinuxMihomoAssetPattern},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.goos, func(t *testing.T) {
+			cfg := Config{}
+			cfg.applyDefaults(testCase.goos)
+			if cfg.Components.Mihomo.Path != testCase.path {
+				t.Fatalf("mihomo path = %q, want %q", cfg.Components.Mihomo.Path, testCase.path)
+			}
+			if cfg.Components.Mihomo.Repo != DefaultMihomoRepo || cfg.Components.Mihomo.ReleaseTag != DefaultMihomoReleaseTag {
+				t.Fatalf("mihomo source = %+v", cfg.Components.Mihomo)
+			}
+			if cfg.Components.Mihomo.AssetPattern != testCase.pattern {
+				t.Fatalf("mihomo asset pattern = %q, want %q", cfg.Components.Mihomo.AssetPattern, testCase.pattern)
+			}
+		})
+	}
+}
+
+func TestApplyDefaultsUsesOfficialLinuxMihomoAsset(t *testing.T) {
+	cfg := Config{Components: Components{Mihomo: Component{Repo: OfficialMihomoRepo}}}
+	cfg.applyDefaults("linux")
+	if cfg.Components.Mihomo.Repo != OfficialMihomoRepo {
+		t.Fatalf("mihomo repo = %q", cfg.Components.Mihomo.Repo)
+	}
+	if cfg.Components.Mihomo.ReleaseTag != "" {
+		t.Fatalf("mihomo release tag = %q, want latest", cfg.Components.Mihomo.ReleaseTag)
+	}
+	if cfg.Components.Mihomo.AssetPattern != OfficialLinuxMihomoAssetPattern {
+		t.Fatalf("mihomo asset pattern = %q, want %q", cfg.Components.Mihomo.AssetPattern, OfficialLinuxMihomoAssetPattern)
+	}
+}
+
+func TestApplyDefaultsMigratesFixedMihomoAssetAcrossPlatforms(t *testing.T) {
+	testCases := []struct {
+		goos       string
+		oldPath    string
+		oldPattern string
+		wantPath   string
+		want       string
+	}{
+		{goos: "linux", oldPath: filepath.Join("bin", "mihomo.exe"), oldPattern: DefaultMihomoAssetPattern, wantPath: filepath.Join("bin", "mihomo"), want: LinuxMihomoAssetPattern},
+		{goos: "windows", oldPath: filepath.Join("bin", "mihomo"), oldPattern: LinuxMihomoAssetPattern, wantPath: filepath.Join("bin", "mihomo.exe"), want: DefaultMihomoAssetPattern},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.goos, func(t *testing.T) {
+			cfg := Config{Components: Components{Mihomo: Component{
+				Path:         testCase.oldPath,
+				Repo:         DefaultMihomoRepo,
+				ReleaseTag:   DefaultMihomoReleaseTag,
+				AssetPattern: testCase.oldPattern,
+			}}}
+			cfg.applyDefaults(testCase.goos)
+			if cfg.Components.Mihomo.AssetPattern != testCase.want {
+				t.Fatalf("mihomo asset pattern = %q, want %q", cfg.Components.Mihomo.AssetPattern, testCase.want)
+			}
+			if cfg.Components.Mihomo.Path != testCase.wantPath {
+				t.Fatalf("mihomo path = %q, want %q", cfg.Components.Mihomo.Path, testCase.wantPath)
+			}
+		})
+	}
+}
+
+func TestMihomoPlatformHelpers(t *testing.T) {
+	if got := DefaultMihomoPathFor("windows"); got != filepath.Join("bin", "mihomo.exe") {
+		t.Fatalf("Windows path = %q", got)
+	}
+	if got := DefaultMihomoPathFor("linux"); got != filepath.Join("bin", "mihomo") {
+		t.Fatalf("Linux path = %q", got)
+	}
+	if got := mihomoAssetPatternFor("linux", OfficialMihomoRepo); got != OfficialLinuxMihomoAssetPattern {
+		t.Fatalf("official Linux pattern = %q", got)
+	}
+	if got := DefaultMihomoAssetPatternFor("linux"); got != LinuxMihomoAssetPattern {
+		t.Fatalf("fixed Linux pattern = %q", got)
+	}
+	if got := DefaultMihomoAssetPatternFor("windows"); got != DefaultMihomoAssetPattern {
+		t.Fatalf("Windows pattern = %q", got)
+	}
+	if got := DefaultTargetNameFor("windows"); got != "windows" {
+		t.Fatalf("Windows target name = %q", got)
+	}
+	if got := DefaultTargetNameFor("linux"); got != "linux" {
+		t.Fatalf("Linux target name = %q", got)
+	}
+	windowsTarget := DefaultMihomoTargetFor("windows")
+	if windowsTarget.Name != "windows" || windowsTarget.Type != "windows-mihomo" || windowsTarget.Output != filepath.Join("profiles", "windows.yaml") {
+		t.Fatalf("Windows target = %+v", windowsTarget)
+	}
+	linuxTarget := DefaultMihomoTargetFor("linux")
+	if linuxTarget.Name != "linux" || linuxTarget.Type != "linux-mihomo" || linuxTarget.Hostname != "linux-meshmux" || linuxTarget.Output != filepath.Join("profiles", "linux.yaml") {
+		t.Fatalf("Linux target = %+v", linuxTarget)
 	}
 }

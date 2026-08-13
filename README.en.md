@@ -1,6 +1,8 @@
 # MeshMux
 
-MeshMux is a Windows tray tool for mihomo-based proxy, WireGuard, Tailscale, and mobile profile publishing.
+MeshMux manages mihomo-based proxy, WireGuard, Tailscale, and mobile profile publishing on Windows desktops and Linux desktop/headless environments.
+
+The Windows installer registers the core as an automatic system service that runs before sign-in. The service only reads a protected runtime snapshot under `ProgramData\MeshMux`; the editable user configuration remains in the existing local data directory. The tray starts after user sign-in and manages the current user's proxy, configuration page, and core controls. UAC is only required for installation, removal, or explicit service control, not during a normal boot.
 
 ## Features
 
@@ -11,6 +13,7 @@ MeshMux is a Windows tray tool for mihomo-based proxy, WireGuard, Tailscale, and
 - Windows and mobile profile generation.
 - Mobile profile publishing through Sub-Store Files.
 - Installer bundle with `mihomo.exe`, `geoip.metadb`, and MetaCubeXD.
+- Linux systemd core, loopback configuration service, and XFCE tray controls.
 
 ## Usage
 
@@ -33,7 +36,7 @@ See the Chinese README for the full JSON example. The patched core is based on u
 Application:
 
 ```text
-%LocalAppData%\Programs\MeshMux
+C:\Program Files\MeshMux
 ```
 
 User data:
@@ -45,6 +48,10 @@ User data:
 The user data directory stores local config, generated profiles, logs, and mihomo state.
 
 Logs rotate automatically by size. `mihomo.out.log` and `mihomo.err.log` are limited to 8 MiB each with up to 3 backups; `meshmux.log` is limited to 2 MiB with up to 2 backups. Oversized legacy logs are cleaned before the core starts, and URLs, keys, tokens, and similar sensitive fields are redacted before log writes.
+
+## Linux
+
+Linux can run the persistent core with `meshmux run linux` and expose the configuration page on loopback with `meshmux serve`. The `packaging/linux` directory contains systemd units, an XFCE login entry, restricted sudoers rules, and the target-host installer. The tray is independent from the core: exiting it does not stop the proxy, and no tray process runs without a graphical session.
 
 ## License
 

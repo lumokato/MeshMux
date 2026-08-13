@@ -15,7 +15,7 @@ func ExeDir() string {
 
 func BundledMihomoPath() string {
 	if dir := ExeDir(); dir != "" {
-		return filepath.Join(dir, "bin", "mihomo.exe")
+		return filepath.Join(dir, DefaultMihomoPath())
 	}
 	return ""
 }

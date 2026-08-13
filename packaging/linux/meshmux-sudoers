@@ -1,0 +1,1 @@
+codex ALL=(root) NOPASSWD: /usr/bin/systemctl start meshmux.service, /usr/bin/systemctl stop meshmux.service, /usr/bin/systemctl restart meshmux.service, /usr/bin/systemctl enable meshmux.service, /usr/bin/systemctl disable meshmux.service

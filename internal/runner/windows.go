@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/meshmux/meshmux/internal/winservice"
 )
 
 func Proxy(mode string, port int) error {
@@ -50,6 +52,14 @@ func Autostart(mode string) error {
 		return fmt.Errorf("autostart is only implemented on Windows")
 	}
 	key := `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+	if winservice.Installed() {
+		switch mode {
+		case "on", "show":
+			return nil
+		case "off":
+			return fmt.Errorf("服务模式下开机自启由安装器管理")
+		}
+	}
 	switch mode {
 	case "on":
 		exe, err := os.Executable()
@@ -76,6 +86,9 @@ func Autostart(mode string) error {
 func AutostartEnabled() bool {
 	if runtime.GOOS != "windows" {
 		return false
+	}
+	if winservice.Installed() {
+		return true
 	}
 	out, err := hiddenCommand("reg", "query", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "/v", "MeshMux").CombinedOutput()
 	return err == nil && strings.Contains(string(out), "MeshMux")

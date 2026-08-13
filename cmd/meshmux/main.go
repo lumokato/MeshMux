@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/meshmux/meshmux/internal/config"
@@ -15,12 +20,14 @@ import (
 	"github.com/meshmux/meshmux/internal/publisher"
 	"github.com/meshmux/meshmux/internal/runner"
 	"github.com/meshmux/meshmux/internal/updater"
+	"github.com/meshmux/meshmux/internal/webui"
 )
 
-var version = "0.2.1"
+var version = "0.3.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		writeWindowsCommandError(os.Args[1:], err)
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -32,6 +39,8 @@ func run(args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "_service":
+		return runWindowsService(args[1:])
 	case "_supervise":
 		return runSupervisor(args[1:])
 	case "version":
@@ -137,7 +146,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		targetName := commandArg(args[1:], "windows")
+		targetName := commandArg(args[1:], defaultRuntimeTarget())
 		profile, err := generator.GenerateNamed(cfg, targetName)
 		if err != nil {
 			return err
@@ -148,12 +157,16 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		targetName := commandArg(args[1:], "windows")
+		targetName := commandArg(args[1:], defaultRuntimeTarget())
 		profile, err := generator.GenerateNamed(cfg, targetName)
 		if err != nil {
 			return err
 		}
 		return startDetached(cfg, configPath, profile)
+	case "run":
+		return runForeground(args[1:])
+	case "serve":
+		return serveHeadless(args[1:])
 	case "stop":
 		cfg, _, err := load(args[1:])
 		if err != nil {
@@ -165,7 +178,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		targetName := commandArg(args[1:], "windows")
+		targetName := commandArg(args[1:], defaultRuntimeTarget())
 		profile, err := generator.GenerateNamed(cfg, targetName)
 		if err != nil {
 			return err
@@ -194,10 +207,128 @@ func run(args []string) error {
 	case "autostart":
 		mode := commandArg(args[1:], "show")
 		return runner.Autostart(mode)
+	case "service":
+		return manageWindowsService(args[1:])
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func runForeground(args []string) error {
+	cfg, _, err := load(args)
+	if err != nil {
+		return err
+	}
+	targetName := commandArg(args, defaultRuntimeTarget())
+	profile, err := generator.GenerateNamed(cfg, targetName)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runner.RunContext(ctx, cfg, profile)
+}
+
+func serveHeadless(args []string) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return serveHeadlessContext(ctx, args, os.Stdout)
+}
+
+func serveHeadlessContext(ctx context.Context, args []string, output io.Writer) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	listen := fs.String("listen", "127.0.0.1:9088", "loopback listen address")
+	configPath := fs.String("config", "", "configuration path")
+	urlFile := fs.String("url-file", "", "write the authenticated URL to this file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, resolved, err := load(configArgs(*configPath))
+	if err != nil {
+		return err
+	}
+	_ = cfg
+	server, err := webui.StartAt(resolved, *listen)
+	if err != nil {
+		return err
+	}
+	if path := strings.TrimSpace(*urlFile); path != "" {
+		if err := writeURLFile(path, server.URL); err != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = server.Shutdown(shutdownCtx)
+			<-server.Done()
+			return err
+		}
+		defer removeURLFile(path, server.URL)
+	} else {
+		fmt.Fprintln(output, server.URL)
+	}
+	select {
+	case err := <-server.Done():
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		return <-server.Done()
+	}
+}
+
+func writeURLFile(path, url string) error {
+	dir := filepath.Dir(path)
+	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return fmt.Errorf("create URL file: %w", err)
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+
+	if err := temp.Chmod(0600); err != nil {
+		temp.Close()
+		return fmt.Errorf("secure URL file: %w", err)
+	}
+	if _, err := io.WriteString(temp, url+"\n"); err != nil {
+		temp.Close()
+		return fmt.Errorf("write URL file: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return fmt.Errorf("sync URL file: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close URL file: %w", err)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("publish URL file: %w", err)
+	}
+	return nil
+}
+
+func removeURLFile(path, url string) {
+	data, err := os.ReadFile(path)
+	if err != nil || strings.TrimSpace(string(data)) != url {
+		return
+	}
+	_ = os.Remove(path)
+}
+
+func configArgs(path string) []string {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	return []string{"-config", path}
+}
+
+func defaultRuntimeTarget() string {
+	if runtime.GOOS == "linux" {
+		return "linux"
+	}
+	return "windows"
 }
 
 func load(args []string) (*config.Config, string, error) {
@@ -415,12 +546,15 @@ Usage:
   meshmux download mihomo|dashboard|all [-config path]
   meshmux test [target] [-config path]
   meshmux start [target] [-config path]
+  meshmux run [target] [-config path]
+  meshmux serve [-listen 127.0.0.1:9088] [-config path] [-url-file path]
   meshmux stop
   meshmux restart [target] [-config path]
   meshmux status [-config path]
   meshmux dashboard [-config path]
   meshmux proxy on|off|show [-config path]
   meshmux autostart on|off|show
+  meshmux service install|activate|remove|start|stop|restart|status [-config path]
   meshmux version
 `)
 }

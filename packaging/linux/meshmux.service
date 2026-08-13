@@ -1,0 +1,31 @@
+[Unit]
+Description=MeshMux headless proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=codex
+Group=codex
+WorkingDirectory=/home/codex/.local/share/meshmux
+Environment=MESHMUX_HOME=/home/codex/.local/share/meshmux
+ExecStart=/home/codex/.local/lib/meshmux/meshmux run linux -config /home/codex/.config/meshmux/meshmux.local.json
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=15s
+NoNewPrivileges=yes
+PrivateDevices=no
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/codex/.local/share/meshmux /home/codex/.config/meshmux
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+InaccessiblePaths=-/var/run/docker.sock -/run/containerd/containerd.sock -/opt/linesky/lowalt-v2
+
+[Install]
+WantedBy=multi-user.target

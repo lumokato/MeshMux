@@ -70,6 +70,24 @@ func TestMobileProfileKeepsMixedPort(t *testing.T) {
 	}
 }
 
+func TestLinuxProfileBindsDNSOnlyToLoopback(t *testing.T) {
+	enabledDNS := true
+	cfg := &config.Config{
+		Ports: config.Ports{Mixed: 2080, Controller: "127.0.0.1:9090"},
+		DNS:   config.DNS{Enabled: &enabledDNS},
+	}
+	text, err := Render(cfg, config.Target{Name: "linux", Type: "linux-mihomo", Output: "profiles/linux.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "  listen: 127.0.0.1:1053\n") {
+		t.Fatalf("linux profile DNS is not loopback-only:\n%s", text)
+	}
+	if strings.Contains(text, "  listen: 0.0.0.0:1053\n") {
+		t.Fatalf("linux profile exposes DNS on all interfaces:\n%s", text)
+	}
+}
+
 func TestTailscaleInboundForwardsOnlyRenderForWindows(t *testing.T) {
 	enabledDNS := true
 	cfg := &config.Config{

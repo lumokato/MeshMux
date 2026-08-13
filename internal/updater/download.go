@@ -125,30 +125,51 @@ func installMihomo(archivePath, targetPath string) (string, error) {
 	if err := extractArchive(archivePath, tmp); err != nil {
 		return "", err
 	}
-	var exe string
+	var executable string
 	err := filepath.WalkDir(tmp, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || exe != "" {
+		if err != nil || d.IsDir() || executable != "" {
 			return err
 		}
-		name := strings.ToLower(d.Name())
-		if strings.HasSuffix(name, ".exe") && strings.Contains(name, "mihomo") {
-			exe = path
+		if isMihomoExecutableName(d.Name()) {
+			executable = path
 		}
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
-	if exe == "" {
+	if executable == "" {
 		return "", fmt.Errorf("mihomo executable not found in archive")
 	}
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 		return "", err
 	}
-	if err := copyFile(exe, targetPath); err != nil {
+	if err := copyFile(executable, targetPath); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(targetPath, 0755); err != nil {
 		return "", err
 	}
 	return targetPath, nil
+}
+
+func isMihomoExecutableName(name string) bool {
+	name = strings.ToLower(filepath.Base(name))
+	if name == "mihomo.exe" || name == "mihomo" {
+		return true
+	}
+	if strings.HasPrefix(name, "mihomo-windows-") {
+		return strings.HasSuffix(name, ".exe")
+	}
+	if !strings.HasPrefix(name, "mihomo-linux-") {
+		return false
+	}
+	for _, suffix := range []string{".zip", ".gz", ".tgz", ".tar", ".zst", ".deb", ".rpm", ".yaml", ".yml", ".json", ".txt", ".md", ".patch"} {
+		if strings.HasSuffix(name, suffix) {
+			return false
+		}
+	}
+	return true
 }
 
 func installDashboard(archivePath, targetPath string) (string, error) {
@@ -178,6 +199,8 @@ func extractArchive(path, dest string) error {
 		return extractZip(path, dest)
 	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
 		return extractTarGz(path, dest)
+	case strings.HasSuffix(lower, ".gz"):
+		return extractGzip(path, dest)
 	default:
 		return fmt.Errorf("unsupported archive type: %s", path)
 	}
@@ -212,7 +235,11 @@ func extractZip(path, dest string) error {
 		if err != nil {
 			return err
 		}
-		out, err := os.Create(target)
+		mode := file.Mode().Perm()
+		if mode == 0 {
+			mode = 0644
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 		if err != nil {
 			_ = in.Close()
 			return err
@@ -222,6 +249,9 @@ func extractZip(path, dest string) error {
 		_ = out.Close()
 		if copyErr != nil {
 			return copyErr
+		}
+		if err := os.Chmod(target, mode); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -265,7 +295,11 @@ func extractTarGz(path, dest string) error {
 			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 				return err
 			}
-			out, err := os.Create(target)
+			mode := header.FileInfo().Mode().Perm()
+			if mode == 0 {
+				mode = 0644
+			}
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 			if err != nil {
 				return err
 			}
@@ -274,8 +308,45 @@ func extractTarGz(path, dest string) error {
 			if copyErr != nil {
 				return copyErr
 			}
+			if err := os.Chmod(target, mode); err != nil {
+				return err
+			}
 		}
 	}
+}
+
+func extractGzip(path, dest string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	gz, err := gzip.NewReader(file)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+	name := filepath.Base(strings.TrimSpace(gz.Name))
+	if name == "" || name == "." {
+		name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
+	target := filepath.Join(dest, name)
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return err
+	}
+	out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, gz)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Chmod(target, 0755)
 }
 
 func findDashboardRoot(root string) string {
@@ -298,13 +369,27 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
+	info, err := in.Stat()
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
+	mode := info.Mode().Perm()
+	if mode == 0 {
+		mode = 0644
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Chmod(dst, mode)
 }
 
 func copyDir(src, dst string) error {

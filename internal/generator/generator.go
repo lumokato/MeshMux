@@ -399,7 +399,11 @@ func renderDNS(b *strings.Builder, cfg *config.Config, target config.Target) {
 	linef(b, "dns:")
 	linef(b, "  enable: true")
 	if !isMobileTarget(target) {
-		linef(b, "  listen: 0.0.0.0:1053")
+		listenAddress := "0.0.0.0:1053"
+		if target.Type == "linux-mihomo" {
+			listenAddress = "127.0.0.1:1053"
+		}
+		linef(b, "  listen: %s", listenAddress)
 	}
 	linef(b, "  ipv6: true")
 	linef(b, "  respect-rules: false")

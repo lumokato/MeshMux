@@ -15,12 +15,15 @@ import (
 )
 
 const (
-	AppName                   = "MeshMux"
-	DefaultConfigPath         = "meshmux.local.json"
-	ExampleConfigPath         = "templates/meshmux.example.json"
-	DefaultMihomoRepo         = "lumokato/MeshMux"
-	DefaultMihomoReleaseTag   = "mihomo-v1.19.29-meshmux.1"
-	DefaultMihomoAssetPattern = `mihomo-windows-amd64-compatible-v1\.19\.29-meshmux\.1\.zip$`
+	AppName                         = "MeshMux"
+	DefaultConfigPath               = "meshmux.local.json"
+	ExampleConfigPath               = "templates/meshmux.example.json"
+	DefaultMihomoRepo               = "lumokato/MeshMux"
+	DefaultMihomoReleaseTag         = "mihomo-v1.19.29-meshmux.1"
+	DefaultMihomoAssetPattern       = `mihomo-windows-amd64-compatible-v1\.19\.29-meshmux\.1\.zip$`
+	LinuxMihomoAssetPattern         = `mihomo-linux-amd64-compatible-v1\.19\.29-meshmux\.1\.gz$`
+	OfficialMihomoRepo              = "MetaCubeX/mihomo"
+	OfficialLinuxMihomoAssetPattern = `mihomo-linux-amd64-compatible.*\.gz$`
 )
 
 type Config struct {
@@ -239,6 +242,10 @@ func InitLocal(overwrite bool) error {
 }
 
 func (c *Config) ApplyDefaults() {
+	c.applyDefaults(runtime.GOOS)
+}
+
+func (c *Config) applyDefaults(goos string) {
 	if c.Name == "" {
 		c.Name = "default"
 	}
@@ -269,18 +276,20 @@ func (c *Config) ApplyDefaults() {
 	if c.Tailscale.IPv6Routes == nil {
 		c.Tailscale.IPv6Routes = []string{"fd7a:115c:a1e0::/48"}
 	}
-	if c.Components.Mihomo.Path == "" {
-		c.Components.Mihomo.Path = filepath.Join("bin", "mihomo.exe")
-	}
-	if c.Components.Mihomo.Repo == "" || legacyMihomoComponent(c.Components.Mihomo) {
+	if c.Components.Mihomo.Repo == "" || legacyMihomoComponent(goos, c.Components.Mihomo) {
 		c.Components.Mihomo.Repo = DefaultMihomoRepo
 		c.Components.Mihomo.ReleaseTag = DefaultMihomoReleaseTag
-		c.Components.Mihomo.AssetPattern = DefaultMihomoAssetPattern
+		c.Components.Mihomo.AssetPattern = DefaultMihomoAssetPatternFor(goos)
+	} else if defaultMihomoComponent(c.Components.Mihomo) {
+		c.Components.Mihomo.AssetPattern = DefaultMihomoAssetPatternFor(goos)
 	} else if c.Components.Mihomo.AssetPattern == "" {
-		c.Components.Mihomo.AssetPattern = DefaultMihomoAssetPattern
+		c.Components.Mihomo.AssetPattern = mihomoAssetPatternFor(goos, c.Components.Mihomo.Repo)
 	}
 	if c.Components.Mihomo.Repo == DefaultMihomoRepo && c.Components.Mihomo.ReleaseTag == "" {
 		c.Components.Mihomo.ReleaseTag = DefaultMihomoReleaseTag
+	}
+	if c.Components.Mihomo.Path == "" || (defaultMihomoComponent(c.Components.Mihomo) && isKnownDefaultMihomoPath(c.Components.Mihomo.Path)) {
+		c.Components.Mihomo.Path = DefaultMihomoPathFor(goos)
 	}
 	if c.Components.Dashboard.Path == "" {
 		c.Components.Dashboard.Path = "dashboard"
@@ -293,18 +302,65 @@ func (c *Config) ApplyDefaults() {
 	}
 	c.deriveSetup()
 	c.deriveTailnetDomains()
-	c.ApplySetup()
+	c.applySetup(goos)
 }
 
-func legacyMihomoComponent(component Component) bool {
+func defaultMihomoComponent(component Component) bool {
+	if !strings.EqualFold(strings.TrimSpace(component.Repo), DefaultMihomoRepo) {
+		return false
+	}
+	switch component.AssetPattern {
+	case "", DefaultMihomoAssetPattern, LinuxMihomoAssetPattern:
+		return true
+	default:
+		return false
+	}
+}
+
+func legacyMihomoComponent(goos string, component Component) bool {
 	switch component.Repo {
-	case "MetaCubeX/mihomo":
+	case OfficialMihomoRepo:
 		switch component.AssetPattern {
-		case "", `mihomo-windows-amd64-compatible.*\.zip$`, `mihomo-windows-amd64.*\.zip$`:
+		case `mihomo-windows-amd64-compatible.*\.zip$`, `mihomo-windows-amd64.*\.zip$`:
 			return true
+		case "":
+			return goos == "windows"
 		}
 	}
 	return false
+}
+
+func DefaultMihomoPath() string {
+	return DefaultMihomoPathFor(runtime.GOOS)
+}
+
+func DefaultMihomoPathFor(goos string) string {
+	name := "mihomo"
+	if goos == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join("bin", name)
+}
+
+func isKnownDefaultMihomoPath(path string) bool {
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	return cleaned == filepath.Clean(DefaultMihomoPathFor("windows")) || cleaned == filepath.Clean(DefaultMihomoPathFor("linux"))
+}
+
+func DefaultMihomoAssetPatternFor(goos string) string {
+	if goos != "linux" {
+		return DefaultMihomoAssetPattern
+	}
+	return LinuxMihomoAssetPattern
+}
+
+func mihomoAssetPatternFor(goos, repo string) string {
+	if strings.EqualFold(strings.TrimSpace(repo), OfficialMihomoRepo) {
+		if goos == "linux" {
+			return OfficialLinuxMihomoAssetPattern
+		}
+	}
+	return DefaultMihomoAssetPatternFor(goos)
 }
 
 func (c *Config) Validate() error {
@@ -357,6 +413,10 @@ func (c Config) StorageCopy() Config {
 }
 
 func (c *Config) ApplySetup() {
+	c.applySetup(runtime.GOOS)
+}
+
+func (c *Config) applySetup(goos string) {
 	c.Setup.ProviderURL = strings.TrimSpace(c.Setup.ProviderURL)
 	c.Setup.SubStoreURL = strings.TrimSpace(c.Setup.SubStoreURL)
 	c.Setup.SubStoreBackend = strings.Trim(strings.TrimSpace(c.Setup.SubStoreBackend), "/")
@@ -369,8 +429,9 @@ func (c *Config) ApplySetup() {
 		Path:     filepath.Join("providers", "main.yaml"),
 		Interval: 3600,
 	}}
+	desktopTarget := DefaultMihomoTargetFor(goos)
 	c.Targets = []Target{
-		{Name: "windows", Type: "windows-mihomo", Hostname: "windows-meshmux", Output: filepath.Join("profiles", "windows.yaml")},
+		desktopTarget,
 		{Name: "mobile", Type: "mobile-mihomo", Hostname: "mobile-meshmux", Output: filepath.Join("profiles", "mobile.yaml")},
 	}
 	c.Publish = []PublishTarget{{
@@ -382,6 +443,24 @@ func (c *Config) ApplySetup() {
 		FileName: c.Setup.SubStoreFileName,
 		TokenEnv: "MESHMUX_SUBSTORE_TOKEN",
 	}}
+}
+
+func DefaultMihomoTarget() Target {
+	return DefaultMihomoTargetFor(runtime.GOOS)
+}
+
+func DefaultMihomoTargetFor(goos string) Target {
+	if DefaultTargetNameFor(goos) == "linux" {
+		return Target{Name: "linux", Type: "linux-mihomo", Hostname: "linux-meshmux", Output: filepath.Join("profiles", "linux.yaml")}
+	}
+	return Target{Name: "windows", Type: "windows-mihomo", Hostname: "windows-meshmux", Output: filepath.Join("profiles", "windows.yaml")}
+}
+
+func DefaultTargetNameFor(goos string) string {
+	if goos == "linux" {
+		return "linux"
+	}
+	return "windows"
 }
 
 func (c *Config) deriveSetup() {

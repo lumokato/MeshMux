@@ -1,12 +1,14 @@
 package runner
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -102,7 +104,7 @@ func TestStartRejectsUnmanagedPortConflict(t *testing.T) {
 	port := listener.Addr().(*net.TCPAddr).Port
 	cfg := &config.Config{}
 	cfg.Ports.Controller = "127.0.0.1:" + strconv.Itoa(port)
-	cfg.Components.Mihomo.Path = filepath.Join("bin", "mihomo.exe")
+	cfg.Components.Mihomo.Path = config.DefaultMihomoPath()
 	fake.addProcess(900, filepath.Join(t.TempDir(), "other.exe"), []int{port})
 
 	launched := false
@@ -202,19 +204,99 @@ func TestSuperviseStaysAliveUntilManagedProcessStops(t *testing.T) {
 	}
 }
 
+func TestSuperviseContextStopsManagedProcessOnCancellation(t *testing.T) {
+	dir := useTempWorkingDir(t)
+	fake := newFakeProcessSystem()
+	restoreRunnerHooks(t, fake)
+	cfg := testRunnerConfig(t, dir)
+	executable, err := expectedMihomoPath(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mihomoLauncher = func(mihomo, profile string, stdout, stderr io.Writer) (launchedProcess, error) {
+		wait := fake.addLaunchedProcess(601, executable, discoveryPorts(cfg))
+		return launchedProcess{pid: 601, wait: wait}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- SuperviseContext(ctx, cfg, "profiles/linux.yaml", func(pid int) error {
+			if pid != 601 {
+				t.Errorf("ready PID = %d", pid)
+			}
+			ready <- struct{}{}
+			return nil
+		})
+	}()
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("supervisor did not report ready")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SuperviseContext: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("supervisor did not stop after cancellation")
+	}
+	if got := fake.killedPIDs(); !reflect.DeepEqual(got, []int{601}) {
+		t.Fatalf("killed PIDs = %v", got)
+	}
+	if _, err := os.Stat(pidFilePath); !os.IsNotExist(err) {
+		t.Fatalf("PID file still exists: %v", err)
+	}
+}
+
+func TestRunContextReportsUnexpectedProcessExit(t *testing.T) {
+	dir := useTempWorkingDir(t)
+	fake := newFakeProcessSystem()
+	restoreRunnerHooks(t, fake)
+	cfg := testRunnerConfig(t, dir)
+	executable, err := expectedMihomoPath(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mihomoLauncher = func(mihomo, profile string, stdout, stderr io.Writer) (launchedProcess, error) {
+		wait := fake.addLaunchedProcess(701, executable, discoveryPorts(cfg))
+		return launchedProcess{pid: 701, wait: wait}, nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- RunContext(context.Background(), cfg, "profiles/linux.yaml") }()
+	deadline := time.Now().Add(time.Second)
+	for !fake.hasProcess(701) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if err := fake.kill(701); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "mihomo exited") {
+			t.Fatalf("RunContext error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunContext did not report process exit")
+	}
+}
+
 func TestPrepareMihomoSyncsBundledDefaultPath(t *testing.T) {
 	dir := useTempWorkingDir(t)
-	bundled := filepath.Join(dir, "bundled", "mihomo.exe")
+	coreName := filepath.Base(config.DefaultMihomoPath())
+	bundled := filepath.Join(dir, "bundled", coreName)
 	if err := os.MkdirAll(filepath.Dir(bundled), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(bundled, []byte("new-core"), 0644); err != nil {
+	if err := os.WriteFile(bundled, []byte("new-core"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Truncate(bundled, minMihomoSize); err != nil {
 		t.Fatal(err)
 	}
-	target := filepath.Join("bin", "mihomo.exe")
+	target := config.DefaultMihomoPath()
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -239,12 +321,20 @@ func TestPrepareMihomoSyncsBundledDefaultPath(t *testing.T) {
 	if err != nil || !equal {
 		t.Fatalf("bundled core was not synchronized: equal=%v err=%v", equal, err)
 	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0111 == 0 {
+		t.Fatalf("bundled core mode = %v, want executable", info.Mode().Perm())
+	}
 }
 
 func TestPrepareMihomoPreservesCustomPath(t *testing.T) {
 	dir := useTempWorkingDir(t)
-	bundled := filepath.Join(dir, "bundled", "mihomo.exe")
-	custom := filepath.Join(dir, "custom", "mihomo.exe")
+	coreName := filepath.Base(config.DefaultMihomoPath())
+	bundled := filepath.Join(dir, "bundled", coreName)
+	custom := filepath.Join(dir, "custom", coreName)
 	for path, content := range map[string]string{bundled: "bundled-core", custom: "custom-core"} {
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			t.Fatal(err)
@@ -279,7 +369,7 @@ func TestPrepareMihomoPreservesCustomPath(t *testing.T) {
 
 func TestPrepareMihomoUpgradesManagedBundle(t *testing.T) {
 	dir := useTempWorkingDir(t)
-	bundled := filepath.Join(dir, "bundled", "mihomo.exe")
+	bundled := filepath.Join(dir, "bundled", filepath.Base(config.DefaultMihomoPath()))
 	if err := os.MkdirAll(filepath.Dir(bundled), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +386,7 @@ func TestPrepareMihomoUpgradesManagedBundle(t *testing.T) {
 	oldBundledMihomoPath := bundledMihomoPath
 	bundledMihomoPath = func() string { return bundled }
 	t.Cleanup(func() { bundledMihomoPath = oldBundledMihomoPath })
-	cfg := &config.Config{Components: config.Components{Mihomo: config.Component{Path: filepath.Join("bin", "mihomo.exe")}}}
+	cfg := &config.Config{Components: config.Components{Mihomo: config.Component{Path: config.DefaultMihomoPath()}}}
 	cfg.ApplyDefaults()
 	if _, err := prepareMihomo(cfg, true); err != nil {
 		t.Fatal(err)
@@ -305,7 +395,7 @@ func TestPrepareMihomoUpgradesManagedBundle(t *testing.T) {
 	if _, err := prepareMihomo(cfg, true); err != nil {
 		t.Fatal(err)
 	}
-	equal, err := sameFileContents(bundled, filepath.Join("bin", "mihomo.exe"))
+	equal, err := sameFileContents(bundled, config.DefaultMihomoPath())
 	if err != nil || !equal {
 		t.Fatalf("managed bundle was not upgraded: equal=%v err=%v", equal, err)
 	}
@@ -313,8 +403,8 @@ func TestPrepareMihomoUpgradesManagedBundle(t *testing.T) {
 
 func TestPrepareMihomoPreservesDownloadedDefaultCore(t *testing.T) {
 	dir := useTempWorkingDir(t)
-	bundled := filepath.Join(dir, "bundled", "mihomo.exe")
-	target := filepath.Join("bin", "mihomo.exe")
+	bundled := filepath.Join(dir, "bundled", filepath.Base(config.DefaultMihomoPath()))
+	target := config.DefaultMihomoPath()
 	for path, marker := range map[string]string{bundled: "bundle-core", target: "downloaded-core"} {
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			t.Fatal(err)
@@ -395,7 +485,7 @@ func testRunnerConfig(t *testing.T, dir string) *config.Config {
 	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	mihomo := filepath.Join(dir, "bin", "mihomo.exe")
+	mihomo := filepath.Join(dir, config.DefaultMihomoPath())
 	if err := os.WriteFile(mihomo, nil, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +500,7 @@ func testRunnerConfig(t *testing.T, dir string) *config.Config {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{}
-	cfg.Components.Mihomo.Path = filepath.Join("bin", "mihomo.exe")
+	cfg.Components.Mihomo.Path = config.DefaultMihomoPath()
 	cfg.Ports.Controller = "127.0.0.1:" + strconv.Itoa(freeTCPPort(t))
 	cfg.Ports.Mixed = freeTCPPort(t)
 	return cfg
@@ -564,4 +654,11 @@ func (f *fakeProcessSystem) livePIDs() []int {
 	}
 	sort.Ints(pids)
 	return pids
+}
+
+func (f *fakeProcessSystem) hasProcess(pid int) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.paths[pid]
+	return ok
 }

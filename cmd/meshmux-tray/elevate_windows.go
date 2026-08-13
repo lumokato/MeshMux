@@ -9,6 +9,8 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/meshmux/meshmux/internal/winservice"
 )
 
 func setDPIAwareness() {
@@ -30,6 +32,9 @@ func setDPIAwareness() {
 }
 
 func relaunchElevatedIfNeeded() (bool, error) {
+	if winservice.Installed() {
+		return false, nil
+	}
 	if windows.GetCurrentProcessToken().IsElevated() {
 		return false, nil
 	}

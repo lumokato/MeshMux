@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/meshmux/meshmux/internal/publisher"
 	"github.com/meshmux/meshmux/internal/runner"
 	"github.com/meshmux/meshmux/internal/updater"
+	"github.com/meshmux/meshmux/internal/winservice"
 )
 
 type Server struct {
@@ -27,31 +29,81 @@ type Server struct {
 	Token      string
 	URL        string
 	server     *http.Server
+	done       chan error
+}
+
+type platformUI struct {
+	RuntimeTitle       string
+	RuntimeTarget      string
+	RuntimeTargetType  string
+	RuntimeHostname    string
+	RuntimeOutput      string
+	ProxyModeLabel     string
+	SubscriptionScope  string
+	InboundScope       string
+	InboundPlaceholder string
+	SystemProxy        bool
+	RuntimeActions     bool
 }
 
 func Start(configPath string) (*Server, error) {
+	return StartAt(configPath, "127.0.0.1:0")
+}
+
+func StartAt(configPath, listenAddress string) (*Server, error) {
+	if err := validateLoopbackAddress(listenAddress); err != nil {
+		return nil, err
+	}
 	token, err := randomToken()
 	if err != nil {
 		return nil, err
 	}
 	mux := http.NewServeMux()
-	s := &Server{ConfigPath: configPath, Token: token}
+	s := &Server{ConfigPath: configPath, Token: token, done: make(chan error, 1)}
 	mux.HandleFunc("/", s.auth(s.index))
 	mux.HandleFunc("/api/config", s.auth(s.configAPI))
 	mux.HandleFunc("/api/action", s.auth(s.actionAPI))
 	mux.HandleFunc("/api/status", s.auth(s.statusAPI))
 	mux.HandleFunc("/api/wireguard/import", s.auth(s.importWireGuardAPI))
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", listenAddress)
 	if err != nil {
 		return nil, err
 	}
 	s.URL = "http://" + listener.Addr().String() + "/?token=" + token
 	s.server = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
-		_ = s.server.Serve(listener)
+		err := s.server.Serve(listener)
+		if err == http.ErrServerClosed {
+			err = nil
+		}
+		s.done <- err
+		close(s.done)
 	}()
 	return s, nil
+}
+
+func validateLoopbackAddress(address string) error {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return fmt.Errorf("invalid listen address %q: %w", address, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("listen address must use a loopback IP, got %q", host)
+	}
+	parsedPort, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return fmt.Errorf("invalid listen port %q", port)
+	}
+	if parsedPort > 65535 {
+		return fmt.Errorf("invalid listen port %q", port)
+	}
+	return nil
+}
+
+func (s *Server) Done() <-chan error {
+	return s.done
 }
 
 type statusItem struct {
@@ -80,24 +132,27 @@ func (s *Server) statusAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func buildStatus(cfg *config.Config) statusPayload {
+	return buildStatusFor(runtime.GOOS, cfg)
+}
+
+func buildStatusFor(goos string, cfg *config.Config) statusPayload {
 	var items []statusItem
 	add := func(label, value, state, detail string) {
 		items = append(items, statusItem{Label: label, Value: value, State: state, Detail: detail})
 	}
-	if pid, ok := runner.PID(cfg); ok {
+	controllerReady := runner.ControllerReady(cfg)
+	pid, managedCoreRunning := runner.PID(cfg)
+	if managedCoreRunning {
 		add("核心进程", "运行中", "ok", "PID "+strconv.Itoa(pid))
+	} else if goos == "windows" && winservice.Running() && controllerReady {
+		add("核心进程", "运行中", "ok", "Windows 服务运行中")
+	} else if goos == "linux" && controllerReady {
+		add("核心进程", "运行中", "ok", "控制接口实时可用")
 	} else {
 		add("核心进程", "未运行", "warn", "")
 	}
-	if cfg.TUN.Enabled {
-		if runner.CanStartTUN() {
-			add("TUN", "已启用", "ok", "管理员权限可用")
-		} else {
-			add("TUN", "权限不足", "err", "需要管理员权限")
-		}
-	} else {
-		add("TUN", "关闭", "muted", "")
-	}
+	tun := tunStatusFor(goos, cfg.TUN.Enabled, runtimeTUNEnabled(cfg), runner.CanStartTUN)
+	add(tun.Label, tun.Value, tun.State, tun.Detail)
 	if runner.ProxyEnabled() {
 		add("系统代理", "开启", "ok", fmt.Sprintf("127.0.0.1:%d", cfg.Ports.Mixed))
 	} else {
@@ -113,7 +168,7 @@ func buildStatus(cfg *config.Config) statusPayload {
 	} else {
 		add("混合端口", "未监听", "warn", fmt.Sprintf("127.0.0.1:%d", cfg.Ports.Mixed))
 	}
-	if runner.ControllerReady(cfg) {
+	if controllerReady {
 		add("控制接口", "可连接", "ok", "http://"+cfg.Ports.Controller)
 	} else {
 		add("控制接口", "不可连接", "warn", "http://"+cfg.Ports.Controller)
@@ -125,8 +180,10 @@ func buildStatus(cfg *config.Config) statusPayload {
 		add("订阅", "未配置", "warn", "")
 	}
 	if cfg.Tailscale.Enabled {
-		if cfg.Tailscale.AuthKey != "" || cfg.Tailscale.AuthKeyFile != "" {
-			add("Tailnet", "已启用", "ok", fmt.Sprintf("%d 条路由，%d 个入站转发", len(cfg.Tailscale.Routes)+len(cfg.Tailscale.IPv6Routes), len(cfg.Tailscale.InboundForwards)))
+		if runtimeTailnetAlive(cfg) {
+			add("Tailnet", "已连接", "ok", fmt.Sprintf("%d 条路由，%d 个入站转发", len(cfg.Tailscale.Routes)+len(cfg.Tailscale.IPv6Routes), len(cfg.Tailscale.InboundForwards)))
+		} else if cfg.Tailscale.AuthKey != "" || cfg.Tailscale.AuthKeyFile != "" {
+			add("Tailnet", "已配置，运行态需验证", "warn", fmt.Sprintf("%d 条路由，%d 个入站转发", len(cfg.Tailscale.Routes)+len(cfg.Tailscale.IPv6Routes), len(cfg.Tailscale.InboundForwards)))
 		} else {
 			add("Tailnet", "缺少 Auth Key", "warn", "")
 		}
@@ -142,6 +199,65 @@ func buildStatus(cfg *config.Config) statusPayload {
 		add("WireGuard", fmt.Sprintf("%d 个配置", wg.ReadableCount), "ok", fmt.Sprintf("%d 个 peer", wg.PeerCount))
 	}
 	return statusPayload{Items: items, Logs: recentStatusLogs()}
+}
+
+func tunStatusFor(goos string, enabled, runtimeEnabled bool, canStartTUN func() bool) statusItem {
+	if !enabled {
+		return statusItem{Label: "TUN", Value: "关闭", State: "muted"}
+	}
+	if goos == "linux" {
+		if runtimeEnabled {
+			return statusItem{Label: "TUN", Value: "已启用", State: "ok", Detail: "核心实时配置已验证"}
+		}
+		return statusItem{Label: "TUN", Value: "已配置，等待重启", State: "warn", Detail: "重启核心后验证"}
+	}
+	if runtimeEnabled {
+		return statusItem{Label: "TUN", Value: "已启用", State: "ok", Detail: "核心实时配置已验证"}
+	}
+	if canStartTUN() {
+		return statusItem{Label: "TUN", Value: "已配置，等待重启", State: "warn", Detail: "重启核心后验证"}
+	}
+	return statusItem{Label: "TUN", Value: "权限不足", State: "err", Detail: "需要管理员权限"}
+}
+
+func runtimeTUNEnabled(cfg *config.Config) bool {
+	client := &http.Client{Timeout: 700 * time.Millisecond}
+	resp, err := client.Get("http://" + cfg.Ports.Controller + "/configs")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var current struct {
+		TUN struct {
+			Enable bool `json:"enable"`
+		} `json:"tun"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&current); err != nil {
+		return false
+	}
+	return current.TUN.Enable
+}
+
+func runtimeTailnetAlive(cfg *config.Config) bool {
+	client := &http.Client{Timeout: 700 * time.Millisecond}
+	resp, err := client.Get("http://" + cfg.Ports.Controller + "/proxies/Tailnet")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var proxy struct {
+		Alive bool `json:"alive"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&proxy); err != nil {
+		return false
+	}
+	return proxy.Alive
 }
 
 func tcpReady(addr string) bool {
@@ -245,10 +361,86 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = io.WriteString(w, indexHTML)
+	_, _ = io.WriteString(w, renderIndexHTML(runtime.GOOS))
+}
+
+func renderIndexHTML(goos string) string {
+	ui := platformUIFor(goos)
+	replacer := strings.NewReplacer(
+		"{{RUNTIME_TITLE}}", ui.RuntimeTitle,
+		"{{RUNTIME_TARGET}}", ui.RuntimeTarget,
+		"{{RUNTIME_TARGET_TYPE}}", ui.RuntimeTargetType,
+		"{{RUNTIME_HOSTNAME}}", ui.RuntimeHostname,
+		"{{RUNTIME_OUTPUT}}", ui.RuntimeOutput,
+		"{{PROXY_MODE_LABEL}}", ui.ProxyModeLabel,
+		"{{SUBSCRIPTION_SCOPE}}", ui.SubscriptionScope,
+		"{{INBOUND_SCOPE}}", ui.InboundScope,
+		"{{INBOUND_PLACEHOLDER}}", ui.InboundPlaceholder,
+		"{{SYSTEM_PROXY_CLASS}}", boolClass(ui.SystemProxy),
+		"{{RUNTIME_ACTION_HIDDEN}}", hiddenAttribute(ui.RuntimeActions),
+	)
+	return replacer.Replace(indexHTML)
+}
+
+func platformUIFor(goos string) platformUI {
+	if goos == "linux" {
+		return platformUI{
+			RuntimeTitle:       "Linux 服务器运行",
+			RuntimeTarget:      "linux",
+			RuntimeTargetType:  "linux-mihomo",
+			RuntimeHostname:    "linux-meshmux",
+			RuntimeOutput:      "profiles/linux.yaml",
+			ProxyModeLabel:     "代理端口（固定）",
+			SubscriptionScope:  "Linux 服务器和手机共用",
+			InboundScope:       "Linux 主机的局域网或公网网卡",
+			InboundPlaceholder: "linux-ssh,tcp,22,127.0.0.1:22",
+			SystemProxy:        false,
+			RuntimeActions:     false,
+		}
+	}
+	return platformUI{
+		RuntimeTitle:       "Windows 运行方式",
+		RuntimeTarget:      "windows",
+		RuntimeTargetType:  "windows-mihomo",
+		RuntimeHostname:    "windows-meshmux",
+		RuntimeOutput:      "profiles/windows.yaml",
+		ProxyModeLabel:     "系统代理",
+		SubscriptionScope:  "Windows 和手机共用",
+		InboundScope:       "Windows 局域网或公网网卡",
+		InboundPlaceholder: "windows-ssh,tcp,22,127.0.0.1:22",
+		SystemProxy:        true,
+		RuntimeActions:     true,
+	}
+}
+
+func boolClass(show bool) string {
+	if show {
+		return ""
+	}
+	return "hidden"
+}
+
+func hiddenAttribute(show bool) string {
+	if show {
+		return ""
+	}
+	return "hidden"
+}
+
+func platformActionAllowed(goos, action string) bool {
+	switch action {
+	case "start", "stop", "proxy-on", "proxy-off", "dashboard":
+		return platformUIFor(goos).RuntimeActions
+	default:
+		return true
+	}
 }
 
 func (s *Server) configAPI(w http.ResponseWriter, r *http.Request) {
+	s.configAPIFor(runtime.GOOS, w, r)
+}
+
+func (s *Server) configAPIFor(goos string, w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		cfg, path, err := config.Load(s.ConfigPath)
@@ -370,6 +562,10 @@ func (s *Server) importWireGuardAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) actionAPI(w http.ResponseWriter, r *http.Request) {
+	s.actionAPIFor(runtime.GOOS, w, r)
+}
+
+func (s *Server) actionAPIFor(goos string, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -380,6 +576,10 @@ func (s *Server) actionAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !platformActionAllowed(goos, req.Action) {
+		http.Error(w, fmt.Sprintf("Linux Web 管理页不允许执行 %s；请通过 systemd 或桌面会话管理", req.Action), http.StatusForbidden)
 		return
 	}
 	cfg, resolved, err := config.Load(s.ConfigPath)
@@ -406,9 +606,17 @@ func (s *Server) actionAPI(w http.ResponseWriter, r *http.Request) {
 			message = "已生成: " + path
 		}
 	case "start":
+		if goos == "windows" && winservice.Installed() {
+			if err := winservice.RunElevated("restart", s.ConfigPath); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			message = "已请求重启核心服务"
+			break
+		}
 		target := req.Target
 		if target == "" {
-			target = "windows"
+			target = platformUIFor(runtime.GOOS).RuntimeTarget
 		}
 		path, err := generator.GenerateNamed(cfg, target)
 		if err != nil {
@@ -421,6 +629,14 @@ func (s *Server) actionAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		message = "核心已启动"
 	case "stop":
+		if goos == "windows" && winservice.Installed() {
+			if err := winservice.RunElevated("stop", ""); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			message = "已请求停止核心服务"
+			break
+		}
 		if err := runner.Stop(cfg); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -674,6 +890,7 @@ const indexHTML = `<!doctype html>
     .loglist { display:grid; gap:8px; }
     .logline { border:1px solid var(--line); border-radius:8px; padding:9px 10px; color:var(--muted); overflow-wrap:anywhere; font-family:Consolas, ui-monospace, monospace; font-size:12px; line-height:1.45; }
     .compact { display:grid; gap:10px; }
+    .hidden { display:none !important; }
     @media (max-width:900px) { .cards { grid-template-columns:repeat(2,minmax(150px,1fr)); } }
     @media (max-width:800px) { .shell { grid-template-columns:1fr; } aside { border-right:0; border-bottom:1px solid var(--line); } nav { grid-template-columns:repeat(3,1fr); } main { padding:14px; } header { display:grid; } .path { text-align:left; } .grid { grid-template-columns:1fr; } .cards { grid-template-columns:1fr; } }
   </style>
@@ -700,7 +917,7 @@ const indexHTML = `<!doctype html>
           <div class="grid">
             <label>日常代理订阅链接
               <input id="providerUrl" placeholder="https://sub-store/download/collection/...">
-              <span>用于生成 Windows 和手机共用的 mihomo 配置。</span>
+              <span>用于生成{{SUBSCRIPTION_SCOPE}}的 mihomo 配置。</span>
             </label>
             <label>Sub-Store 地址
               <input id="subStoreUrl" placeholder="https://substore.example/">
@@ -736,18 +953,18 @@ const indexHTML = `<!doctype html>
         </div>
 
         <div class="panel">
-          <h2>Windows 运行方式</h2>
+          <h2>{{RUNTIME_TITLE}}</h2>
           <div class="seg">
-            <button id="modeProxy" onclick="setMode('proxy')">系统代理</button>
+            <button id="modeProxy" onclick="setMode('proxy')">{{PROXY_MODE_LABEL}}</button>
             <button id="modeTun" onclick="setMode('tun')">TUN</button>
           </div>
           <div class="actions">
             <button onclick="runAction('download-mihomo')">下载/更新 mihomo</button>
             <button onclick="runAction('download-dashboard')">下载/更新 MetaCubeXD</button>
-            <button class="primary" onclick="saveThen('start','windows')">启动核心</button>
-            <button onclick="runAction('stop')">停止核心</button>
-            <button onclick="runAction('proxy-on')">系统代理开</button>
-            <button onclick="runAction('proxy-off')">系统代理关</button>
+            <button class="primary" {{RUNTIME_ACTION_HIDDEN}} onclick="saveThen('start',runtimeTarget)">启动核心</button>
+            <button {{RUNTIME_ACTION_HIDDEN}} onclick="runAction('stop')">停止核心</button>
+            <button class="{{SYSTEM_PROXY_CLASS}}" onclick="runAction('proxy-on')">系统代理开</button>
+            <button class="{{SYSTEM_PROXY_CLASS}}" onclick="runAction('proxy-off')">系统代理关</button>
           </div>
         </div>
       </section>
@@ -764,8 +981,8 @@ const indexHTML = `<!doctype html>
         </div>
         <div class="panel">
           <h2>Tailnet 入站转发</h2>
-          <div class="hint">只监听 MeshMux 内嵌 tsnet 节点的 Tailnet 地址，不绑定 Windows 局域网或公网网卡。每行格式：名称,协议,监听端口,目标地址。</div>
-          <textarea id="tsInboundForwards" spellcheck="false" placeholder="windows-ssh,tcp,22,127.0.0.1:22&#10;example-udp,udp,12345,127.0.0.1:12345"></textarea>
+          <div class="hint">只监听 MeshMux 内嵌 tsnet 节点的 Tailnet 地址，不绑定{{INBOUND_SCOPE}}。每行格式：名称,协议,监听端口,目标地址。</div>
+          <textarea id="tsInboundForwards" spellcheck="false" placeholder="{{INBOUND_PLACEHOLDER}}&#10;example-udp,udp,12345,127.0.0.1:12345"></textarea>
         </div>
         <div class="panel">
           <h2>配置 JSON</h2>
@@ -783,7 +1000,7 @@ const indexHTML = `<!doctype html>
           <div id="statusCards" class="cards"></div>
           <div class="actions">
             <button onclick="refreshStatus()">刷新状态</button>
-            <button onclick="runAction('dashboard')">打开 MetaCubeXD</button>
+            <button {{RUNTIME_ACTION_HIDDEN}} onclick="runAction('dashboard')">打开 MetaCubeXD</button>
           </div>
         </div>
         <div class="panel">
@@ -798,6 +1015,8 @@ const indexHTML = `<!doctype html>
   <script>
     const token = new URLSearchParams(location.search).get('token') || '';
     const headers = {'Content-Type':'application/json','X-MeshMux-Token':token};
+    const runtimeTarget = '{{RUNTIME_TARGET}}';
+    const runtimeTargetTemplate = {name:'{{RUNTIME_TARGET}}', type:'{{RUNTIME_TARGET_TYPE}}', hostname:'{{RUNTIME_HOSTNAME}}', output:'{{RUNTIME_OUTPUT}}'};
     let cfg = {};
     let mode = 'proxy';
     function el(id){ return document.getElementById(id); }
@@ -866,7 +1085,7 @@ const indexHTML = `<!doctype html>
       cfg.ports.controller = val('controller') || '127.0.0.1:9090';
       cfg.providers = [{name:'main', type:'substore', url:cfg.setup.providerUrl, path:'providers/main.yaml', interval:3600}];
       cfg.targets = [
-        {name:'windows', type:'windows-mihomo', hostname:'windows-meshmux', output:'profiles/windows.yaml'},
+        runtimeTargetTemplate,
         {name:'mobile', type:'mobile-mihomo', hostname:'mobile-meshmux', output:'profiles/mobile.yaml'}
       ];
       cfg.publish = [{name:'mobile-substore', type:'substore-files', input:'profiles/mobile.yaml', baseUrl:cfg.setup.subStoreUrl, backend:cfg.setup.subStoreBackend, fileName:cfg.setup.subStoreFileName || '', tokenEnv:'MESHMUX_SUBSTORE_TOKEN'}];

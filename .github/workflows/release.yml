@@ -6,7 +6,7 @@ on:
       version:
         description: "Release version"
         required: true
-        default: "0.2.1"
+        default: "0.3.0"
   push:
     tags:
       - "v*"
@@ -19,7 +19,38 @@ env:
   MIHOMO_CORE_SHA256: B0E8B3680726F314AC483DCB78C2A7D4193373DD88750884019A0A08352C281B
 
 jobs:
+  linux-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go for MeshMux
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+
+      - name: Install Linux tray dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
+
+      - name: Resolve version
+        shell: bash
+        run: |
+          version="${{ github.event.inputs.version }}"
+          if [[ -z "$version" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          echo "MESHMUX_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Test and build Linux binaries
+        run: |
+          go test ./...
+          go vet ./...
+          go build -ldflags "-s -w -X main.version=$MESHMUX_VERSION" -o /tmp/meshmux ./cmd/meshmux
+          go build -ldflags "-s -w -X main.version=$MESHMUX_VERSION" -o /tmp/meshmux-tray ./cmd/meshmux-tray
+
   windows:
+    needs: linux-check
     runs-on: windows-latest
 
     steps:
@@ -105,11 +136,11 @@ jobs:
           body: |
             MeshMux ${{ env.MESHMUX_VERSION }} 正式版。
 
-            - 为 `type: tailscale` 增加通用 Tailnet TCP/UDP 入站端口转发。
-            - 支持多条映射、配置校验、重载清理和停止时关闭全部 Tailnet 监听。
-            - 默认关闭，不配置 `inboundForwards` 时保持原有行为。
-            - 升级时安全同步安装包内置的补丁版 mihomo，同时保留显式自定义或已下载核心。
-            - 清理已废弃的旧核心来源兼容项；默认配置和 CI 均固定使用 MeshMux 仓库中的 `v1.19.29-meshmux.1` 资产。
+            - Windows 核心改为登录前自动启动的系统服务，正常开机不再需要 UAC 确认。
+            - Windows 服务使用受保护的运行快照，升级切换失败时自动恢复原用户核心。
+            - 增加 Linux headless runner、loopback 配置服务、systemd 单元和 XFCE 托盘控制。
+            - Linux 托盘支持核心、自启和桌面系统代理控制，退出托盘不停止核心。
+            - 配置生成、运行态探测、下载与 Web 管理页适配 Windows/Linux 双平台。
 
             安装包内置 MeshMux 固定核心 `v1.19.29-meshmux.1`、geoip.metadb 和 MetaCubeXD。核心二进制与对应源码见 [固定核心资产](https://github.com/lumokato/MeshMux/releases/tag/mihomo-v1.19.29-meshmux.1)，第三方组件来源见 THIRD_PARTY_NOTICES.md。
           files: release/*.exe

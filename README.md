@@ -1,6 +1,8 @@
 # MeshMux
 
-MeshMux 是 Windows 托盘工具，用 mihomo 管理日常代理、WireGuard、Tailscale 和移动端配置发布。
+MeshMux 是面向 Windows 桌面与 Linux 桌面/headless 环境的 mihomo 管理工具，用于日常代理、WireGuard、Tailscale 和移动端配置发布。
+
+Windows 安装版将核心注册为自动启动的系统服务，未登录桌面时也会运行；托盘在用户登录后启动，负责当前用户的系统代理、配置页面和核心控制。服务只读取 `ProgramData\MeshMux` 中受系统保护的运行快照，用户配置保留在原来的本地数据目录；启动或重启服务时会先提权生成新快照。安装、卸载或人工启停服务时才需要 UAC，正常开机不需要确认。
 
 English README: [README.en.md](README.en.md)
 
@@ -13,6 +15,7 @@ English README: [README.en.md](README.en.md)
 - 生成 Windows profile 与 mobile profile。
 - 上传 mobile profile 到 Sub-Store Files。
 - 安装包内置 `mihomo.exe`、`geoip.metadb` 和 MetaCubeXD。
+- Linux 支持 systemd 常驻核心、loopback 配置服务和 XFCE 托盘控制。
 
 ## 使用
 
@@ -63,7 +66,7 @@ MeshMux 使用补丁版 Mihomo 的 `type: tailscale` 代理，在对应 tsnet �
 程序目录：
 
 ```text
-%LocalAppData%\Programs\MeshMux
+C:\Program Files\MeshMux
 ```
 
 用户数据目录：
@@ -77,6 +80,10 @@ MeshMux 使用补丁版 Mihomo 的 `type: tailscale` 代理，在对应 tsnet �
 升级到带补丁核心的版本时，MeshMux 会在停止旧核心后同步安装包内置的默认 `bin\mihomo.exe`。显式配置的自定义核心路径不会被覆盖；通过 MeshMux 下载功能更新的默认核心也会被保留。
 
 日志会自动按大小轮转。`mihomo.out.log` 和 `mihomo.err.log` 每个文件上限 8 MiB，最多保留 3 个备份；`meshmux.log` 上限 2 MiB，最多保留 2 个备份。启动核心前会清理超限的历史日志，写入日志时会隐藏 URL、密钥、令牌等敏感字段。
+
+## Linux
+
+Linux 可使用 `meshmux run linux` 运行常驻核心，使用 `meshmux serve` 提供仅监听 loopback 的配置页面。仓库中的 `packaging/linux` 包含 systemd 单元、XFCE 登录自启动项、受限 sudoers 规则和目标机安装脚本。核心服务与托盘相互独立：退出托盘不会停止代理，无图形会话时也不会额外启动托盘。
 
 ## 手机端
 

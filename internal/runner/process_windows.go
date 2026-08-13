@@ -22,6 +22,10 @@ func canStartTUN() bool {
 	return cmd.Run() == nil
 }
 
+func tunUnavailableMessage() string {
+	return "TUN 模式需要管理员权限；请用管理员身份运行 MeshMux，或关闭 TUN 改用系统代理模式"
+}
+
 type nativeProcessSystem struct{}
 
 func (nativeProcessSystem) executablePath(pid int) (string, error) {
