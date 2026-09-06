@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,9 +15,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/meshmux/meshmux/internal/config"
+	"github.com/meshmux/meshmux/internal/fileutil"
 )
 
 type release struct {
@@ -23,11 +27,26 @@ type release struct {
 }
 
 type asset struct {
-	Name string `json:"name"`
-	URL  string `json:"browser_download_url"`
+	Name   string `json:"name"`
+	URL    string `json:"browser_download_url"`
+	Digest string `json:"digest"`
 }
 
+var downloadMu sync.Mutex
+
 func Download(component config.Component, kind string) (string, error) {
+	if !downloadMu.TryLock() {
+		return "", fmt.Errorf("another component download is in progress")
+	}
+	defer downloadMu.Unlock()
+	unlock, err := fileutil.TryLock(filepath.Join("state", "core-operation.lock"))
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	if kind != "mihomo" && kind != "dashboard" {
+		return "", fmt.Errorf("unsupported component kind %q", kind)
+	}
 	if component.Repo == "" {
 		return "", fmt.Errorf("%s repo is empty", kind)
 	}
@@ -44,8 +63,23 @@ func Download(component config.Component, kind string) (string, error) {
 	if err := os.MkdirAll("downloads", 0755); err != nil {
 		return "", err
 	}
-	archivePath := filepath.Join("downloads", asset.Name)
+	if !filepath.IsLocal(asset.Name) || strings.ContainsAny(asset.Name, "/\\:") {
+		return "", fmt.Errorf("unsafe release asset name %q", asset.Name)
+	}
+	downloadDir, err := os.MkdirTemp("downloads", "component-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(downloadDir)
+	archivePath := filepath.Join(downloadDir, asset.Name)
+	expected, err := assetChecksum(component, asset)
+	if err != nil {
+		return "", err
+	}
 	if err := downloadFile(asset.URL, archivePath); err != nil {
+		return "", err
+	}
+	if err := verifyChecksum(archivePath, expected); err != nil {
 		return "", err
 	}
 	switch kind {
@@ -72,7 +106,7 @@ func releaseAsset(repo, tag, pattern string) (asset, error) {
 		return asset{}, fmt.Errorf("GitHub release query failed: %s", resp.Status)
 	}
 	var rel release
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&rel); err != nil {
 		return asset{}, err
 	}
 	re, err := regexp.Compile(pattern)
@@ -96,37 +130,23 @@ func downloadFile(rawURL, path string) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("download failed: %s", resp.Status)
 	}
-	tmp := path + ".part"
-	_ = os.Remove(tmp)
-	out, err := os.Create(tmp)
-	if err != nil {
+	return fileutil.Write(path, 0600, func(out io.Writer) error {
+		_, err := copyLimited(out, resp.Body, maxDownloadBytes)
 		return err
-	}
-	_, copyErr := io.Copy(out, resp.Body)
-	closeErr := out.Close()
-	if copyErr != nil {
-		_ = os.Remove(tmp)
-		return copyErr
-	}
-	if closeErr != nil {
-		_ = os.Remove(tmp)
-		return closeErr
-	}
-	_ = os.Remove(path)
-	return os.Rename(tmp, path)
+	})
 }
 
 func installMihomo(archivePath, targetPath string) (string, error) {
-	tmp := filepath.Join("downloads", "mihomo-extract")
-	_ = os.RemoveAll(tmp)
-	if err := os.MkdirAll(tmp, 0755); err != nil {
+	tmp, err := os.MkdirTemp(filepath.Dir(archivePath), "mihomo-extract-*")
+	if err != nil {
 		return "", err
 	}
+	defer os.RemoveAll(tmp)
 	if err := extractArchive(archivePath, tmp); err != nil {
 		return "", err
 	}
 	var executable string
-	err := filepath.WalkDir(tmp, func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(tmp, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || executable != "" {
 			return err
 		}
@@ -173,20 +193,50 @@ func isMihomoExecutableName(name string) bool {
 }
 
 func installDashboard(archivePath, targetPath string) (string, error) {
-	tmp := filepath.Join("downloads", "dashboard-extract")
-	_ = os.RemoveAll(tmp)
-	if err := os.MkdirAll(tmp, 0755); err != nil {
+	target, err := filepath.Abs(targetPath)
+	if err != nil {
 		return "", err
 	}
-	if err := extractArchive(archivePath, tmp); err != nil {
+	workingDir, err := os.Getwd()
+	if err != nil {
 		return "", err
 	}
-	root := findDashboardRoot(tmp)
+	relative, err := filepath.Rel(target, workingDir)
+	if err == nil && (relative == "." || filepath.IsLocal(relative)) {
+		return "", fmt.Errorf("dashboard target must not contain the working directory")
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return "", err
+	}
+	temp, err := os.MkdirTemp(filepath.Dir(target), ".dashboard-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if temp != "" {
+			_ = os.RemoveAll(temp)
+		}
+	}()
+	extracted := filepath.Join(temp, "extracted")
+	if err := extractArchive(archivePath, extracted); err != nil {
+		return "", err
+	}
+	root := findDashboardRoot(extracted)
 	if root == "" {
-		root = tmp
+		return "", fmt.Errorf("dashboard archive has no index.html")
 	}
-	_ = os.RemoveAll(targetPath)
-	if err := copyDir(root, targetPath); err != nil {
+	backup := filepath.Join(temp, "previous")
+	if err := os.Rename(target, backup); err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := os.Rename(root, target); err != nil {
+		if _, statErr := os.Stat(backup); statErr == nil {
+			if restoreErr := os.Rename(backup, target); restoreErr != nil {
+				recovery := temp
+				temp = ""
+				return "", fmt.Errorf("install failed: %v; restore failed: %v; previous dashboard retained at %s", err, restoreErr, recovery)
+			}
+		}
 		return "", err
 	}
 	return targetPath, nil
@@ -212,7 +262,14 @@ func extractZip(path, dest string) error {
 		return err
 	}
 	defer reader.Close()
+	if len(reader.File) > maxArchiveEntries {
+		return fmt.Errorf("archive has too many entries")
+	}
+	remaining := maxExpandedBytes
 	for _, file := range reader.File {
+		if !filepath.IsLocal(file.Name) || strings.Contains(file.Name, ":") || file.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("unsafe zip path: %s", file.Name)
+		}
 		name := filepath.Clean(file.Name)
 		if name == "." {
 			continue
@@ -244,9 +301,13 @@ func extractZip(path, dest string) error {
 			_ = in.Close()
 			return err
 		}
-		_, copyErr := io.Copy(out, in)
+		count, copyErr := copyLimited(out, in, remaining)
+		remaining -= count
 		_ = in.Close()
-		_ = out.Close()
+		closeErr := out.Close()
+		if copyErr == nil {
+			copyErr = closeErr
+		}
 		if copyErr != nil {
 			return copyErr
 		}
@@ -269,6 +330,8 @@ func extractTarGz(path, dest string) error {
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
+	remaining := maxExpandedBytes
+	entries := 0
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -276,6 +339,16 @@ func extractTarGz(path, dest string) error {
 		}
 		if err != nil {
 			return err
+		}
+		entries++
+		if entries > maxArchiveEntries || header.Size < 0 || header.Size > remaining {
+			return fmt.Errorf("archive exceeds extraction limits")
+		}
+		if !filepath.IsLocal(header.Name) || strings.Contains(header.Name, ":") {
+			return fmt.Errorf("unsafe tar path: %s", header.Name)
+		}
+		if header.Typeflag != tar.TypeDir && header.Typeflag != tar.TypeReg {
+			return fmt.Errorf("unsupported tar entry: %s", header.Name)
 		}
 		name := filepath.Clean(header.Name)
 		if name == "." {
@@ -303,8 +376,12 @@ func extractTarGz(path, dest string) error {
 			if err != nil {
 				return err
 			}
-			_, copyErr := io.Copy(out, tr)
-			_ = out.Close()
+			count, copyErr := copyLimited(out, tr, remaining)
+			remaining -= count
+			closeErr := out.Close()
+			if copyErr == nil {
+				copyErr = closeErr
+			}
 			if copyErr != nil {
 				return copyErr
 			}
@@ -338,7 +415,7 @@ func extractGzip(path, dest string) error {
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(out, gz)
+	_, copyErr := copyLimited(out, gz, maxExpandedBytes)
 	closeErr := out.Close()
 	if copyErr != nil {
 		return copyErr
@@ -355,7 +432,7 @@ func findDashboardRoot(root string) string {
 		if err != nil || !d.IsDir() || found != "" {
 			return nil
 		}
-		if _, err := os.Stat(filepath.Join(path, "index.html")); err == nil {
+		if info, err := os.Stat(filepath.Join(path, "index.html")); err == nil && info.Mode().IsRegular() {
 			found = path
 		}
 		return nil
@@ -377,38 +454,61 @@ func copyFile(src, dst string) error {
 	if mode == 0 {
 		mode = 0644
 	}
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-	if err != nil {
+	return fileutil.Write(dst, mode, func(out io.Writer) error {
+		_, err := io.Copy(out, in)
 		return err
-	}
-	_, copyErr := io.Copy(out, in)
-	closeErr := out.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	return os.Chmod(dst, mode)
-}
-
-func copyDir(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dst, rel)
-		if d.IsDir() {
-			return os.MkdirAll(target, 0755)
-		}
-		return copyFile(path, target)
 	})
 }
 
 func httpClient() *http.Client {
 	return &http.Client{Timeout: 120 * time.Second}
+}
+
+const (
+	maxDownloadBytes        int64 = 512 << 20
+	maxExpandedBytes        int64 = 1 << 30
+	maxArchiveEntries             = 20000
+	pinnedWindowsCoreSHA256       = "0338285cfb7ec7c525d955387b14681b72d7b289730654ecd51a1f94bdad5019"
+)
+
+func assetChecksum(component config.Component, selected asset) (string, error) {
+	expected := strings.ToLower(strings.TrimSpace(component.SHA256))
+	if expected == "" && component.Repo == config.DefaultMihomoRepo && component.ReleaseTag == config.DefaultMihomoReleaseTag && selected.Name == "mihomo-windows-amd64-compatible-v1.19.29-meshmux.2.zip" {
+		expected = pinnedWindowsCoreSHA256
+	}
+	if expected == "" {
+		expected = strings.TrimPrefix(selected.Digest, "sha256:")
+	}
+	decoded, err := hex.DecodeString(expected)
+	if err != nil || len(decoded) != sha256.Size {
+		return "", fmt.Errorf("component requires a SHA-256 pin or a GitHub asset SHA-256 digest")
+	}
+	return strings.ToLower(expected), nil
+}
+
+func verifyChecksum(path, expected string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return err
+	}
+	if !strings.EqualFold(hex.EncodeToString(digest.Sum(nil)), expected) {
+		return fmt.Errorf("component SHA-256 mismatch; installation unchanged")
+	}
+	return nil
+}
+
+func copyLimited(out io.Writer, in io.Reader, limit int64) (int64, error) {
+	count, err := io.Copy(out, io.LimitReader(in, limit+1))
+	if err != nil {
+		return count, err
+	}
+	if count > limit {
+		return count, fmt.Errorf("component exceeds byte limit %d", limit)
+	}
+	return count, nil
 }

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/meshmux/meshmux/internal/config"
+	"github.com/meshmux/meshmux/internal/winservice"
+	"golang.org/x/sys/windows/svc"
 )
 
 func TestRemoveCommandArgPreservesFlags(t *testing.T) {
@@ -33,6 +36,140 @@ func TestServiceFailureWritesProtectedDiagnostic(t *testing.T) {
 	text := string(data)
 	if !strings.Contains(text, "start core") || !strings.Contains(text, os.ErrPermission.Error()) {
 		t.Fatalf("service log = %q", text)
+	}
+}
+
+func TestServiceRestartsCoreOnceAfterResumeEvents(t *testing.T) {
+	home := t.TempDir()
+	restoreWorkingDir(t)
+	configPath := filepath.Join(home, config.DefaultConfigPath)
+	profilePath := filepath.Join(home, "profiles", "windows.yaml")
+	if err := os.MkdirAll(filepath.Dir(profilePath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"name":"test","setup":{"allowDirectOnly":true}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profilePath, []byte("mixed-port: 2080\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	originalRun := runServiceCore
+	originalDelay := serviceResumeDelay
+	t.Cleanup(func() {
+		runServiceCore = originalRun
+		serviceResumeDelay = originalDelay
+	})
+	serviceResumeDelay = 20 * time.Millisecond
+	started := make(chan struct{}, 3)
+	runServiceCore = func(ctx context.Context, _ *config.Config, _ string, ready func(int) error) error {
+		started <- struct{}{}
+		if err := ready(100); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		return nil
+	}
+
+	requests := make(chan svc.ChangeRequest, 4)
+	changes := make(chan svc.Status, 4)
+	done := make(chan struct {
+		specific bool
+		code     uint32
+	}, 1)
+	go func() {
+		specific, code := (&serviceHandler{configPath: configPath}).Execute(nil, requests, changes)
+		done <- struct {
+			specific bool
+			code     uint32
+		}{specific: specific, code: code}
+	}()
+
+	waitServiceStatus(t, changes, svc.StartPending)
+	waitServiceStatus(t, changes, svc.Running)
+	waitSignal(t, started, "initial core start")
+	requests <- svc.ChangeRequest{Cmd: svc.PowerEvent, EventType: powerEventResumeAutomatic}
+	requests <- svc.ChangeRequest{Cmd: svc.PowerEvent, EventType: powerEventResumeSuspend}
+	waitSignal(t, started, "resumed core restart")
+	select {
+	case <-started:
+		t.Fatal("resume events started more than one replacement core")
+	case <-time.After(60 * time.Millisecond):
+	}
+
+	requests <- svc.ChangeRequest{Cmd: svc.Stop}
+	waitServiceStatus(t, changes, svc.StopPending)
+	select {
+	case result := <-done:
+		if result.specific || result.code != 0 {
+			t.Fatalf("service result = (%v, %d)", result.specific, result.code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service did not stop")
+	}
+}
+
+func TestServiceResumeFailureReturnsErrorWithoutPanic(t *testing.T) {
+	home := t.TempDir()
+	restoreWorkingDir(t)
+	configPath := filepath.Join(home, config.DefaultConfigPath)
+	if err := os.WriteFile(configPath, []byte(`{"name":"test","setup":{"allowDirectOnly":true}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "profiles"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "profiles", "windows.yaml"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	originalRun, originalDelay := runServiceCore, serviceResumeDelay
+	t.Cleanup(func() {
+		runServiceCore, serviceResumeDelay = originalRun, originalDelay
+	})
+	serviceResumeDelay = time.Millisecond
+	attempts := 0
+	runServiceCore = func(ctx context.Context, _ *config.Config, _ string, ready func(int) error) error {
+		attempts++
+		if attempts == 2 {
+			return errors.New("replacement failed")
+		}
+		if err := ready(100); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		return nil
+	}
+	requests := make(chan svc.ChangeRequest, 1)
+	requests <- svc.ChangeRequest{Cmd: svc.PowerEvent, EventType: powerEventResumeAutomatic}
+	changes := make(chan svc.Status, 8)
+	specific, code := (&serviceHandler{configPath: configPath}).Execute(nil, requests, changes)
+	if !specific || code != 1 || attempts != 2 {
+		t.Fatalf("result=(%v, %d), attempts=%d", specific, code, attempts)
+	}
+	data, err := os.ReadFile(filepath.Join(home, "logs", "service.log"))
+	if err != nil || !strings.Contains(string(data), "replacement failed") {
+		t.Fatalf("missing failure diagnostic: %s, %v", data, err)
+	}
+}
+
+func waitServiceStatus(t *testing.T, changes <-chan svc.Status, want svc.State) {
+	t.Helper()
+	select {
+	case status := <-changes:
+		if status.State != want {
+			t.Fatalf("service state = %v, want %v", status.State, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("service did not report state %v", want)
+	}
+}
+
+func waitSignal(t *testing.T, signals <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-signals:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", name)
 	}
 }
 
@@ -227,7 +364,7 @@ func TestRestartWindowsServiceStopsServiceBeforeUserCore(t *testing.T) {
 	if err := restartWindowsService("restart", configPath); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"prepare", "stop", "stop-user", "start", "verify"}
+	want := []string{"stop", "stop-user", "prepare", "start", "verify"}
 	if strings.Join(actions, ",") != strings.Join(want, ",") {
 		t.Fatalf("actions = %v, want %v", actions, want)
 	}
@@ -544,4 +681,75 @@ func restoreWorkingDir(t *testing.T) {
 			t.Errorf("restore working directory: %v", err)
 		}
 	})
+}
+
+func TestSnapshotRollbackIncludesAssetsAndRemovesNewFiles(t *testing.T) {
+	t.Setenv("ProgramData", t.TempDir())
+	home := winservice.DataDir()
+	old := filepath.Join(home, "providers", "main.yaml")
+	fresh := filepath.Join(home, "wireguard", "new.conf")
+	if err := writeSnapshotFile(old, []byte("old-cache")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{WireGuard: config.WireGuard{Configs: []string{"wireguard/new.conf"}}}
+	backup, err := captureServiceSnapshot(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSnapshotFile(old, []byte("new-cache")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSnapshotFile(fresh, []byte("new-key")); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreServiceSnapshot(backup); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(old)
+	if err != nil || string(data) != "old-cache" {
+		t.Fatalf("asset rollback: %q %v", data, err)
+	}
+	if _, err := os.Stat(fresh); !os.IsNotExist(err) {
+		t.Fatal("new asset survived rollback")
+	}
+}
+
+func TestRestartRollsBackPartiallyWrittenAssetsOnPrepareFailure(t *testing.T) {
+	home := t.TempDir()
+	restoreWorkingDir(t)
+	t.Setenv("MESHMUX_HOME", home)
+	t.Setenv("ProgramData", t.TempDir())
+	source := filepath.Join(home, config.DefaultConfigPath)
+	if err := writeSnapshotFile(source, []byte(`{"setup":{"allowDirectOnly":true}}`)); err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(winservice.DataDir(), "providers", "main.yaml")
+	if err := writeSnapshotFile(cache, []byte("old-cache")); err != nil {
+		t.Fatal(err)
+	}
+	originalPrepare, originalControl, originalStop := prepareWindowsSnapshot, controlWindowsService, stopUserCore
+	t.Cleanup(func() {
+		prepareWindowsSnapshot = originalPrepare
+		controlWindowsService = originalControl
+		stopUserCore = originalStop
+	})
+	var actions []string
+	controlWindowsService = func(action string, _ time.Duration) error { actions = append(actions, action); return nil }
+	stopUserCore = func(*config.Config) error { return nil }
+	prepareWindowsSnapshot = func(string) (string, error) {
+		if err := writeSnapshotFile(cache, []byte("partially-new-cache")); err != nil {
+			return "", err
+		}
+		return "", errors.New("injected snapshot failure")
+	}
+	if err := restartWindowsService("restart", source); err == nil {
+		t.Fatal("expected preparation failure")
+	}
+	data, err := os.ReadFile(cache)
+	if err != nil || string(data) != "old-cache" {
+		t.Fatalf("partial cache survived: %q %v", data, err)
+	}
+	if strings.Join(actions, ",") != "stop,start" {
+		t.Fatalf("actions=%v", actions)
+	}
 }

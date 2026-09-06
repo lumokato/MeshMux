@@ -29,7 +29,7 @@ The Windows installer registers the core as an automatic system service that run
 
 MeshMux bundles a patched Mihomo core that listens only on the embedded tsnet node's Tailnet addresses and forwards configured TCP or UDP ports to local targets. Tailscale ACLs and Grants remain the access-control layer. The mappings are emitted only in the Windows profile; mobile profiles do not inherit them. With no mappings configured, existing outbound-only behavior is unchanged.
 
-See the Chinese README for the full JSON example. The patched core is based on upstream `v1.19.29`; its binary and corresponding source are published as a [fixed MeshMux core asset](https://github.com/lumokato/MeshMux/releases/tag/mihomo-v1.19.29-meshmux.1). MeshMux CI downloads that asset, verifies its SHA-256, and does not rebuild Mihomo for every application release.
+See the Chinese README for the full JSON example. The patched core is based on upstream `v1.19.29`; its binary and corresponding source are published as a [fixed MeshMux core asset](https://github.com/lumokato/MeshMux/releases/tag/mihomo-v1.19.29-meshmux.2). Windows/Linux CI download and verify their fixed binary assets; the corresponding source is available in the same core release. See [Development](docs/DEVELOPMENT.md) and [Architecture](docs/ARCHITECTURE.md) for source authority, historical-artifact quarantine and remaining acceptance gates.
 
 ## Paths
 

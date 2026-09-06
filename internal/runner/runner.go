@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/meshmux/meshmux/internal/config"
+	"github.com/meshmux/meshmux/internal/fileutil"
 )
 
 const (
@@ -38,9 +39,10 @@ type launchedProcess struct {
 }
 
 var (
-	mihomoLauncher    = launchMihomoProcess
-	bundledMihomoPath = config.BundledMihomoPath
-	startupProbeDelay = 1200 * time.Millisecond
+	mihomoLauncher      = launchMihomoProcess
+	bundledMihomoPath   = config.BundledMihomoPath
+	startupProbeDelay   = 1200 * time.Millisecond
+	postStartNetworkRun = postStartNetwork
 )
 
 func Start(cfg *config.Config, profile string) error {
@@ -82,7 +84,15 @@ func runManaged(ctx context.Context, cfg *config.Config, profile string, supervi
 	if cfg.TUN.Enabled && !canStartTUN() {
 		return errors.New(tunUnavailableMessage())
 	}
-	if err := CleanupResidual(cfg); err != nil {
+	unlock, err := fileutil.TryLock(filepath.Join("state", "core-operation.lock"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := stopManaged(cfg); err != nil {
+		return err
+	}
+	if err := CleanupLogs(); err != nil {
 		return err
 	}
 	mihomo, err := prepareMihomo(cfg, true)
@@ -139,21 +149,23 @@ func runManaged(ctx context.Context, cfg *config.Config, profile string, supervi
 		}
 		return fmt.Errorf("mihomo exited immediately: %w%s", err, recentCoreLog())
 	case <-ctx.Done():
-		return stopAfterCancellation(cfg, done, ctx.Err())
+		unlock()
+		return stopAfterCancellation(cfg, process.pid, done, ctx.Err())
 	case <-startupTimer.C:
 	}
-	if err := postStartNetwork(cfg); err != nil {
-		appendRunnerLog("网络后处理失败: %v", err)
-	}
+	unlock()
 	if ready != nil {
 		pid := process.pid
-		if current, ok := PID(cfg); ok {
+		if current, ok := PID(cfg); ok && current == process.pid {
 			pid = current
 		}
 		if err := ready(pid); err != nil {
 			_ = Stop(cfg)
 			return fmt.Errorf("report supervised start: %w", err)
 		}
+	}
+	if err := postStartNetworkRun(cfg); err != nil {
+		appendRunnerLog("网络后处理失败: %v", err)
 	}
 	if supervise {
 		select {
@@ -168,15 +180,26 @@ func runManaged(ctx context.Context, cfg *config.Config, profile string, supervi
 				return fmt.Errorf("mihomo exited: %w%s", err, recentCoreLog())
 			}
 		case <-ctx.Done():
-			return stopAfterCancellation(cfg, done, ctx.Err())
+			return stopAfterCancellation(cfg, process.pid, done, ctx.Err())
 		}
 	}
 	return nil
 }
 
-func stopAfterCancellation(cfg *config.Config, done <-chan error, cause error) error {
-	if err := Stop(cfg); err != nil {
-		return fmt.Errorf("stop mihomo after cancellation: %w", err)
+func stopAfterCancellation(cfg *config.Config, ownedPID int, done <-chan error, cause error) error {
+	unlock, err := fileutil.TryLock(filepath.Join("state", "core-operation.lock"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	expected, err := expectedMihomoPath(cfg)
+	if err != nil {
+		return err
+	}
+	if managedPIDMatches(ownedPID, expected) {
+		if err := processOS.kill(ownedPID); err != nil {
+			return fmt.Errorf("stop owned mihomo after cancellation: %w", err)
+		}
 	}
 	select {
 	case <-done:
@@ -231,6 +254,15 @@ func CleanupResidual(cfg *config.Config) error {
 }
 
 func Stop(cfg *config.Config) error {
+	unlock, err := fileutil.TryLock(filepath.Join("state", "core-operation.lock"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return stopManaged(cfg)
+}
+
+func stopManaged(cfg *config.Config) error {
 	if cfg == nil {
 		return errors.New("config is required")
 	}
@@ -440,6 +472,9 @@ func prepareMihomo(cfg *config.Config, syncBundled bool) (string, error) {
 		}
 	}
 	if !fileLooksUsable(target, minMihomoSize) {
+		if !shouldManageBundledMihomo(cfg, target) {
+			return "", fmt.Errorf("configured mihomo is unavailable at %s; custom cores are never replaced by the bundle", target)
+		}
 		if copyErr := copyBundledMihomo(target); copyErr != nil {
 			return "", fmt.Errorf("mihomo not found at %s and bundled copy is unavailable: %w", target, copyErr)
 		}
@@ -522,23 +557,12 @@ func readMihomoComponentRecord() (mihomoComponentRecord, error) {
 }
 
 func writeMihomoComponentRecord(source string, hash [sha256.Size]byte) error {
-	if err := os.MkdirAll(filepath.Dir(mihomoComponentState), 0755); err != nil {
-		return err
-	}
 	record := mihomoComponentRecord{Source: source, SHA256: hex.EncodeToString(hash[:])}
 	data, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
-	tmp := mihomoComponentState + ".part"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0600); err != nil {
-		return err
-	}
-	if err := os.Remove(mihomoComponentState); err != nil && !os.IsNotExist(err) {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, mihomoComponentState)
+	return fileutil.WriteFile(mihomoComponentState, append(data, '\n'), 0600)
 }
 
 func isDefaultMihomoPath(path string) bool {
@@ -646,34 +670,14 @@ func copyBundledFile(bundled, target string) error {
 		return err
 	}
 	defer in.Close()
-	tmp := target + ".part"
 	mode := info.Mode().Perm()
 	if mode == 0 {
 		mode = 0644
 	}
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-	if err != nil {
+	return fileutil.Write(target, mode, func(out io.Writer) error {
+		_, err := io.Copy(out, in)
 		return err
-	}
-	_, copyErr := io.Copy(out, in)
-	closeErr := out.Close()
-	if copyErr != nil {
-		_ = os.Remove(tmp)
-		return copyErr
-	}
-	if closeErr != nil {
-		_ = os.Remove(tmp)
-		return closeErr
-	}
-	if err := os.Chmod(tmp, mode); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, target)
+	})
 }
 
 func copyBundledDir(bundled, target string) error {

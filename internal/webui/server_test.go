@@ -596,3 +596,24 @@ func TestRecentStatusLogsReadTailAndRedactSecrets(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthRejectsConcurrentMutations(t *testing.T) {
+	server := &Server{Token: "test"}
+	called := false
+	handler := server.auth(func(w http.ResponseWriter, r *http.Request) { called = true; w.WriteHeader(http.StatusOK) })
+	server.operations.Lock()
+	response := httptest.NewRecorder()
+	handler(response, httptest.NewRequest(http.MethodPost, "/api/config?token=test", nil))
+	server.operations.Unlock()
+	if response.Code != http.StatusConflict || called {
+		t.Fatalf("busy mutation: status=%d called=%t", response.Code, called)
+	}
+	response = httptest.NewRecorder()
+	handler(response, httptest.NewRequest(http.MethodGet, "/api/config?token=test", nil))
+	if response.Code != http.StatusOK || !called {
+		t.Fatal("read rejected")
+	}
+	if response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Fatal("secret response headers missing")
+	}
+}

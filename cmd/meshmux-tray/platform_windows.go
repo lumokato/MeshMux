@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -33,17 +32,7 @@ func recordTrayActionError(action string, err error) {
 	if err == nil {
 		return
 	}
-	dataDir := config.LocalDataDir()
-	if mkdirErr := os.MkdirAll(filepath.Join(dataDir, "logs"), 0700); mkdirErr != nil {
-		return
-	}
-	file, openErr := os.OpenFile(filepath.Join(dataDir, "logs", "tray.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-	if openErr != nil {
-		return
-	}
-	defer file.Close()
-	logger := log.New(file, "", log.Ldate|log.Ltime|log.Lmicroseconds)
-	logger.Printf("MeshMux tray action %q failed: %v", action, err)
+	_ = runner.AppendDiagnosticLog(filepath.Join(config.LocalDataDir(), "logs", "tray.log"), fmt.Sprintf("MeshMux tray action %q failed: %v", action, err))
 }
 
 func (b *windowsBackend) Capabilities() trayCapabilities {

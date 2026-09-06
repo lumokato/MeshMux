@@ -204,6 +204,59 @@ func TestSuperviseStaysAliveUntilManagedProcessStops(t *testing.T) {
 	}
 }
 
+func TestServiceReportsReadyBeforeNetworkPostStart(t *testing.T) {
+	dir := useTempWorkingDir(t)
+	fake := newFakeProcessSystem()
+	restoreRunnerHooks(t, fake)
+	cfg := testRunnerConfig(t, dir)
+	executable, err := expectedMihomoPath(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mihomoLauncher = func(mihomo, profile string, stdout, stderr io.Writer) (launchedProcess, error) {
+		wait := fake.addLaunchedProcess(551, executable, discoveryPorts(cfg))
+		return launchedProcess{pid: 551, wait: wait}, nil
+	}
+	postStarted := make(chan struct{})
+	postRelease := make(chan struct{})
+	postStartNetworkRun = func(*config.Config) error {
+		close(postStarted)
+		<-postRelease
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan int, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- ServiceContext(ctx, cfg, "profiles/windows.yaml", func(pid int) error {
+			ready <- pid
+			return nil
+		})
+	}()
+	select {
+	case pid := <-ready:
+		if pid != 551 {
+			t.Fatalf("ready PID = %d", pid)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service did not report ready")
+	}
+	select {
+	case <-postStarted:
+	case <-time.After(time.Second):
+		t.Fatal("network post-start did not begin")
+	}
+	close(postRelease)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ServiceContext: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service did not stop after cancellation")
+	}
+}
 func TestSuperviseContextStopsManagedProcessOnCancellation(t *testing.T) {
 	dir := useTempWorkingDir(t)
 	fake := newFakeProcessSystem()
@@ -446,6 +499,7 @@ func restoreRunnerHooks(t *testing.T, fake *fakeProcessSystem) {
 	oldLauncher := mihomoLauncher
 	oldBundledMihomoPath := bundledMihomoPath
 	oldStartupDelay := startupProbeDelay
+	oldPostStartNetwork := postStartNetworkRun
 	oldStopTimeout := stopProcessTimeout
 	oldStopPoll := stopPollInterval
 	oldStopQuiet := stopQuietPeriod
@@ -460,6 +514,7 @@ func restoreRunnerHooks(t *testing.T, fake *fakeProcessSystem) {
 		mihomoLauncher = oldLauncher
 		bundledMihomoPath = oldBundledMihomoPath
 		startupProbeDelay = oldStartupDelay
+		postStartNetworkRun = oldPostStartNetwork
 		stopProcessTimeout = oldStopTimeout
 		stopPollInterval = oldStopPoll
 		stopQuietPeriod = oldStopQuiet
@@ -661,4 +716,49 @@ func (f *fakeProcessSystem) hasProcess(pid int) bool {
 	defer f.mu.Unlock()
 	_, ok := f.paths[pid]
 	return ok
+}
+
+func TestMissingCustomCoreDoesNotFallBackToBundle(t *testing.T) {
+	dir := useTempWorkingDir(t)
+	bundled := filepath.Join(dir, "bundled-core")
+	if err := os.WriteFile(bundled, make([]byte, minMihomoSize), 0700); err != nil {
+		t.Fatal(err)
+	}
+	previous := bundledMihomoPath
+	bundledMihomoPath = func() string { return bundled }
+	t.Cleanup(func() { bundledMihomoPath = previous })
+	custom := filepath.Join(dir, "custom", "mihomo")
+	cfg := &config.Config{Components: config.Components{Mihomo: config.Component{Path: custom}}}
+	if _, err := prepareMihomo(cfg, true); err == nil {
+		t.Fatal("missing custom core silently replaced")
+	}
+	if _, err := os.Stat(custom); !os.IsNotExist(err) {
+		t.Fatalf("custom core was written: %v", err)
+	}
+}
+
+func TestOldSupervisorCancellationPreservesReplacementCore(t *testing.T) {
+	dir := useTempWorkingDir(t)
+	fake := newFakeProcessSystem()
+	restoreRunnerHooks(t, fake)
+	cfg := testRunnerConfig(t, dir)
+	executable, err := expectedMihomoPath(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = fake.addLaunchedProcess(992, executable, discoveryPorts(cfg))
+	if err := writePID(992); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	done <- nil
+	if err := stopAfterCancellation(cfg, 991, done, context.Canceled); err != nil {
+		t.Fatal(err)
+	}
+	if !fake.hasProcess(992) {
+		t.Fatal("old supervisor killed replacement")
+	}
+	if len(fake.killedPIDs()) != 0 {
+		t.Fatal("unexpected process termination")
+	}
 }

@@ -364,3 +364,30 @@ func TestMihomoPlatformHelpers(t *testing.T) {
 		t.Fatalf("Linux target = %+v", linuxTarget)
 	}
 }
+
+func TestExistingConfigDoesNotRequireExample(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, DefaultConfigPath)
+	if err := os.WriteFile(path, []byte("{\"setup\":{\"allowDirectOnly\":true}}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ensureLocalConfigAt(dir, nil, filepath.Join(dir, "missing-template.json"))
+	if err != nil || got != path {
+		t.Fatalf("path=%q error=%v", got, err)
+	}
+}
+
+func TestRejectUnsafeController(t *testing.T) {
+	for _, controller := range []string{"0.0.0.0:9090", "192.0.2.1:9090", "localhost:9090", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:2080"} {
+		cfg := &Config{Ports: Ports{Mixed: 2080, Controller: controller}}
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("unsafe controller accepted: %s", controller)
+		}
+	}
+	for _, controller := range []string{"127.0.0.1:9090", "[::1]:9090"} {
+		cfg := &Config{Ports: Ports{Mixed: 2080, Controller: controller}}
+		if err := cfg.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

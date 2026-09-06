@@ -3,6 +3,7 @@ package webui
 import (
 	"context"
 	"crypto/rand"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,9 +15,11 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/meshmux/meshmux/internal/config"
+	"github.com/meshmux/meshmux/internal/fileutil"
 	"github.com/meshmux/meshmux/internal/generator"
 	"github.com/meshmux/meshmux/internal/publisher"
 	"github.com/meshmux/meshmux/internal/runner"
@@ -30,6 +33,7 @@ type Server struct {
 	URL        string
 	server     *http.Server
 	done       chan error
+	operations sync.Mutex
 }
 
 type platformUI struct {
@@ -468,6 +472,22 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		if r.Method != http.MethodGet {
+			if !s.operations.TryLock() {
+				http.Error(w, "another operation is in progress", http.StatusConflict)
+				return
+			}
+			defer s.operations.Unlock()
+			unlock, err := fileutil.TryLock(filepath.Join(filepath.Dir(s.ConfigPath), "state", "config-operation.lock"))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+			defer unlock()
+			r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+		}
 		next(w, r)
 	}
 }
@@ -857,7 +877,7 @@ func saveConfig(path string, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0600)
+	return fileutil.WriteFile(path, append(data, '\n'), 0600)
 }
 
 func normalizeWireGuardContent(content string) string {
@@ -947,392 +967,5 @@ func randomToken() (string, error) {
 	return hex.EncodeToString(buf[:]), nil
 }
 
-const indexHTML = `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MeshMux</title>
-  <style>
-    :root { color-scheme: light dark; font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif; --bg:#f6f7f9; --panel:#fff; --text:#18202a; --muted:#667085; --line:#d9dee7; --accent:#2563eb; --ok:#15803d; --warn:#b45309; --danger:#b91c1c; --soft:#eef2f7; }
-    @media (prefers-color-scheme: dark) { :root { --bg:#101316; --panel:#171b20; --text:#eef2f6; --muted:#9aa4b2; --line:#2a3038; --accent:#60a5fa; --ok:#4ade80; --warn:#f59e0b; --danger:#f87171; } }
-    * { box-sizing: border-box; }
-    body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font-size:14px; -webkit-font-smoothing:antialiased; text-rendering:geometricPrecision; }
-    .shell { min-height:100vh; display:grid; grid-template-columns:230px minmax(0,1fr); }
-    aside { border-right:1px solid var(--line); background:var(--panel); padding:18px 14px; display:flex; flex-direction:column; gap:16px; }
-    .brand { display:flex; align-items:center; gap:10px; padding:4px 6px 12px; border-bottom:1px solid var(--line); }
-    .mark { width:30px; height:30px; border-radius:7px; background:var(--accent); color:white; display:grid; place-items:center; font-weight:800; }
-    .brand strong { font-size:17px; }
-    nav { display:grid; gap:6px; }
-    nav button { justify-content:flex-start; border:0; background:transparent; color:var(--text); }
-    nav button.active { background:color-mix(in srgb, var(--accent) 13%, transparent); color:var(--accent); }
-    main { padding:22px; display:grid; gap:16px; align-content:start; max-width:1120px; width:100%; }
-    header { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; }
-    h1 { margin:0; font-size:24px; line-height:1.2; }
-    .sub { color:var(--muted); margin-top:6px; }
-    .path { color:var(--muted); font-size:12px; text-align:right; overflow-wrap:anywhere; max-width:430px; }
-    section { display:none; gap:16px; }
-    section.active { display:grid; }
-    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; display:grid; gap:14px; }
-    .panel h2 { margin:0; font-size:16px; }
-    .grid { display:grid; grid-template-columns:repeat(2,minmax(240px,1fr)); gap:12px; }
-    label { display:grid; gap:6px; font-weight:600; }
-    label span, .hint { color:var(--muted); font-size:12px; font-weight:400; }
-    input, textarea, select { width:100%; min-height:36px; border:1px solid var(--line); border-radius:7px; background:Canvas; color:CanvasText; padding:8px 10px; font:inherit; }
-    textarea { min-height:220px; font-family:Consolas, ui-monospace, monospace; line-height:1.45; }
-    .switch { display:flex; align-items:center; gap:10px; font-weight:600; }
-    .switch input { width:18px; min-height:18px; }
-    .seg { display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; width:max-content; }
-    .seg button { border:0; border-radius:0; background:transparent; min-width:108px; }
-    .seg button.active { background:var(--accent); color:white; }
-    .actions { display:flex; flex-wrap:wrap; gap:8px; }
-    button { min-height:34px; border:1px solid var(--line); border-radius:7px; background:var(--panel); color:var(--text); padding:8px 12px; cursor:pointer; font:inherit; display:inline-flex; align-items:center; justify-content:center; gap:7px; }
-    button.primary { background:var(--accent); color:white; border-color:var(--accent); }
-    button:hover { border-color:var(--accent); }
-    .notice { border:1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); background:color-mix(in srgb, var(--warn) 10%, var(--panel)); border-radius:8px; padding:10px 12px; color:var(--text); display:none; }
-    .notice.show { display:block; }
-    .status { white-space:pre-wrap; min-height:46px; border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:12px; color:var(--muted); }
-    .status.ok { color:var(--ok); }
-    .status.err { color:var(--danger); }
-    .cards { display:grid; grid-template-columns:repeat(3,minmax(170px,1fr)); gap:10px; }
-    .metric { border:1px solid var(--line); border-radius:8px; padding:12px; background:var(--panel); display:grid; gap:5px; min-height:92px; }
-    .metric .label { color:var(--muted); font-size:12px; }
-    .metric .value { font-size:18px; font-weight:700; }
-    .metric .detail { color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
-    .metric.ok { border-color:color-mix(in srgb, var(--ok) 35%, var(--line)); }
-    .metric.warn { border-color:color-mix(in srgb, var(--warn) 45%, var(--line)); }
-    .metric.err { border-color:color-mix(in srgb, var(--danger) 45%, var(--line)); }
-    .loglist { display:grid; gap:8px; }
-    .logline { border:1px solid var(--line); border-radius:8px; padding:9px 10px; color:var(--muted); overflow-wrap:anywhere; font-family:Consolas, ui-monospace, monospace; font-size:12px; line-height:1.45; }
-    .compact { display:grid; gap:10px; }
-    .hidden { display:none !important; }
-    @media (max-width:900px) { .cards { grid-template-columns:repeat(2,minmax(150px,1fr)); } }
-    @media (max-width:800px) { .shell { grid-template-columns:1fr; } aside { border-right:0; border-bottom:1px solid var(--line); } nav { grid-template-columns:repeat(3,1fr); } main { padding:14px; } header { display:grid; } .path { text-align:left; } .grid { grid-template-columns:1fr; } .cards { grid-template-columns:1fr; } }
-  </style>
-</head>
-<body>
-  <div class="shell">
-    <aside>
-      <div class="brand"><div class="mark">M</div><div><strong>MeshMux</strong><div class="hint">mihomo runner</div></div></div>
-      <nav>
-        <button class="active" data-tab="quick" onclick="showTab('quick')">快速设置</button>
-        <button data-tab="advanced" onclick="showTab('advanced')">高级</button>
-        <button data-tab="status" onclick="showTab('status')">状态</button>
-      </nav>
-    </aside>
-    <main>
-      <header>
-        <div><h1>快速设置</h1><div class="sub">只填写首次运行必须的信息，其他配置由 MeshMux 生成。</div></div>
-        <div id="path" class="path"></div>
-      </header>
-
-      <section id="tab-quick" class="active">
-        <div class="panel">
-          <h2>订阅与手机同步</h2>
-          <div class="grid">
-            <label>日常代理订阅链接
-              <input id="providerUrl" placeholder="https://sub-store/download/collection/...">
-              <span>用于生成{{SUBSCRIPTION_SCOPE}}的 mihomo 配置。</span>
-            </label>
-            <label>Sub-Store 地址
-              <input id="subStoreUrl" placeholder="https://substore.example/">
-              <span>站点根地址。</span>
-            </label>
-            <label>后端名
-              <input id="subStoreBackend" placeholder="backend">
-            </label>
-            <label>Tailnet Auth Key
-              <input id="tsAuthKey" type="password" placeholder="可选，启用 Tailnet 时填写">
-              <span>启用 Tailnet 时填写；不填则只生成普通代理配置。</span>
-            </label>
-          </div>
-          <label class="switch"><input id="allowDirectOnly" type="checkbox">仅直连模式（不使用日常代理订阅）</label>
-          <label class="switch"><input id="tsEnabled" type="checkbox">启用 Tailnet 出站</label>
-          <div class="actions">
-            <button class="primary" onclick="saveQuick()">保存</button>
-            <button onclick="saveThen('probe-substore')">验证 Sub-Store</button>
-            <button onclick="saveThen('publish-mobile')">生成并上传手机配置</button>
-          </div>
-        </div>
-
-        <div class="panel">
-          <h2>WireGuard</h2>
-          <div class="grid">
-            <label>WireGuard .conf
-              <input id="wgFile" type="file" accept=".conf,text/plain" multiple>
-              <span id="wgSummary">未导入配置</span>
-            </label>
-          </div>
-          <div class="actions">
-            <button onclick="importWireGuard()">导入 WireGuard 配置</button>
-          </div>
-        </div>
-
-        <div class="panel">
-          <h2>{{RUNTIME_TITLE}}</h2>
-          <div class="seg">
-            <button id="modeProxy" onclick="setMode('proxy')">{{PROXY_MODE_LABEL}}</button>
-            <button id="modeTun" onclick="setMode('tun')">TUN</button>
-          </div>
-          <div class="actions">
-            <button onclick="runAction('download-mihomo')">下载/更新 mihomo</button>
-            <button onclick="runAction('download-dashboard')">下载/更新 MetaCubeXD</button>
-            <button class="primary" {{RUNTIME_ACTION_HIDDEN}} onclick="saveThen('start',runtimeTarget)">启动核心</button>
-            <button {{RUNTIME_ACTION_HIDDEN}} onclick="runAction('stop')">停止核心</button>
-            <button class="{{SYSTEM_PROXY_CLASS}}" onclick="runAction('proxy-on')">系统代理开</button>
-            <button class="{{SYSTEM_PROXY_CLASS}}" onclick="runAction('proxy-off')">系统代理关</button>
-          </div>
-        </div>
-      </section>
-
-      <section id="tab-advanced">
-        <div class="panel">
-          <h2>高级选项</h2>
-          <div class="grid">
-            <label>混合代理端口<input id="mixedPort" type="number" min="1" max="65535"></label>
-            <label>控制器地址<input id="controller"></label>
-            <label>MagicDNS 后缀<input id="tsMagic" placeholder="tailnet.ts.net"></label>
-            <label>Tailnet 域名规则<input id="tsDomains" placeholder="*.ts.net, *.example.ts.net"></label>
-          </div>
-        </div>
-        <div class="panel">
-          <h2>Tailnet 入站转发</h2>
-          <div class="hint">只监听 MeshMux 内嵌 tsnet 节点的 Tailnet 地址，不绑定{{INBOUND_SCOPE}}。每行格式：名称,协议,监听端口,目标地址。</div>
-          <textarea id="tsInboundForwards" spellcheck="false" placeholder="{{INBOUND_PLACEHOLDER}}&#10;example-udp,udp,12345,127.0.0.1:12345"></textarea>
-        </div>
-        <div class="panel">
-          <h2>配置 JSON</h2>
-          <textarea id="advancedJson" spellcheck="false"></textarea>
-          <div class="actions">
-            <button onclick="applyJson()">从 JSON 应用</button>
-            <button onclick="saveJson()">保存 JSON</button>
-          </div>
-        </div>
-      </section>
-
-      <section id="tab-status">
-        <div class="panel">
-          <h2>状态概览</h2>
-          <div id="statusCards" class="cards"></div>
-          <div class="actions">
-            <button onclick="refreshStatus()">刷新状态</button>
-            <button {{RUNTIME_ACTION_HIDDEN}} onclick="runAction('dashboard')">打开 MetaCubeXD</button>
-          </div>
-        </div>
-        <div class="panel">
-          <h2>最近警告</h2>
-          <div id="statusLogs" class="loglist"></div>
-        </div>
-      </section>
-
-      <div id="status" class="status">正在加载配置...</div>
-    </main>
-  </div>
-  <script>
-    const token = new URLSearchParams(location.search).get('token') || '';
-    const headers = {'Content-Type':'application/json','X-MeshMux-Token':token};
-    const runtimeTarget = '{{RUNTIME_TARGET}}';
-    const runtimeTargetTemplate = {name:'{{RUNTIME_TARGET}}', type:'{{RUNTIME_TARGET_TYPE}}', hostname:'{{RUNTIME_HOSTNAME}}', output:'{{RUNTIME_OUTPUT}}'};
-    let cfg = {};
-    let mode = 'proxy';
-    function el(id){ return document.getElementById(id); }
-    function val(id){ return el(id).value.trim(); }
-    function setVal(id,v){ el(id).value = v == null ? '' : String(v); }
-    function ok(text){ const s=el('status'); s.className='status ok'; s.textContent=text; }
-    function err(text){ const s=el('status'); s.className='status err'; s.textContent=text; }
-    function info(text){ const s=el('status'); s.className='status'; s.textContent=text; }
-    function ensure(c){
-      c.name ||= 'default'; c.setup ||= {}; c.ports ||= {}; c.paths ||= {}; c.providers ||= [];
-      c.tun ||= {}; c.dns ||= {}; c.rules ||= {}; c.tailscale ||= {}; c.wireguard ||= {};
-      c.tailscale.inboundForwards ||= [];
-      c.wireguard.configs ||= [];
-      c.components ||= {}; c.components.mihomo ||= {}; c.components.dashboard ||= {};
-      c.targets ||= []; c.publish ||= []; return c;
-    }
-    function deriveSetup(c){
-      ensure(c);
-      const pub = c.publish.find(p => p.type === 'substore-files') || {};
-      if (!c.setup.subStoreUrl && pub.baseUrl && !pub.baseUrl.includes('example')) c.setup.subStoreUrl = pub.baseUrl;
-      if (!c.setup.subStoreBackend && pub.backend) c.setup.subStoreBackend = pub.backend;
-      if (!c.setup.subStoreFileName && pub.fileName) c.setup.subStoreFileName = pub.fileName;
-    }
-    function storageConfig(c){
-      const out = JSON.parse(JSON.stringify(ensure(c)));
-      delete out.providers;
-      delete out.targets;
-      delete out.publish;
-      return out;
-    }
-    async function load(){
-      const r = await fetch('/api/config?token=' + encodeURIComponent(token));
-      const text = await r.text();
-      if (!r.ok) throw new Error(text);
-      const j = JSON.parse(text);
-      cfg = ensure(j.config || JSON.parse(j.content));
-      deriveSetup(cfg);
-      el('path').textContent = j.path;
-      fill();
-      ok('配置已加载');
-    }
-    function fill(){
-      ensure(cfg); deriveSetup(cfg);
-      setVal('providerUrl', cfg.setup.providerUrl || '');
-      el('allowDirectOnly').checked = !!cfg.setup.allowDirectOnly;
-      setVal('subStoreUrl', cfg.setup.subStoreUrl || '');
-      setVal('subStoreBackend', cfg.setup.subStoreBackend || '');
-      el('tsEnabled').checked = !!cfg.tailscale.enabled;
-      setVal('tsAuthKey', cfg.tailscale.authKey || '');
-      mode = cfg.tun.enabled ? 'tun' : 'proxy';
-      setMode(mode);
-      setVal('mixedPort', cfg.ports.mixed || 2080);
-      setVal('controller', cfg.ports.controller || '127.0.0.1:9090');
-      setVal('tsMagic', cfg.tailscale.magicDnsSuffix || '');
-      setVal('tsDomains', (cfg.tailscale.domains || ['*.ts.net']).join(', '));
-      setVal('tsInboundForwards', (cfg.tailscale.inboundForwards || []).map(f => [f.name, f.network, f.listenPort, f.target].join(',')).join('\n'));
-      refreshWireGuardSummary();
-      el('advancedJson').value = JSON.stringify(storageConfig(cfg), null, 2);
-    }
-    function collect(){
-      ensure(cfg);
-      cfg.setup.providerUrl = val('providerUrl');
-      cfg.setup.allowDirectOnly = el('allowDirectOnly').checked;
-      cfg.setup.subStoreUrl = val('subStoreUrl').replace(/\/+$/, '') + (val('subStoreUrl') ? '/' : '');
-      cfg.setup.subStoreBackend = val('subStoreBackend').replace(/^\/+|\/+$/g, '');
-      cfg.setup.subStoreFileName ||= (cfg.publish.find(p => p.type === 'substore-files') || {}).fileName || '';
-      cfg.ports.mixed = Number(val('mixedPort')) || 2080;
-      cfg.ports.controller = val('controller') || '127.0.0.1:9090';
-      cfg.providers = [{name:'main', type:'substore', url:cfg.setup.providerUrl, path:'providers/main.yaml', interval:3600}];
-      cfg.targets = [
-        runtimeTargetTemplate,
-        {name:'mobile', type:'mobile-mihomo', hostname:'mobile-meshmux', output:'profiles/mobile.yaml'}
-      ];
-      cfg.publish = [{name:'mobile-substore', type:'substore-files', input:'profiles/mobile.yaml', baseUrl:cfg.setup.subStoreUrl, backend:cfg.setup.subStoreBackend, fileName:cfg.setup.subStoreFileName || '', tokenEnv:'MESHMUX_SUBSTORE_TOKEN'}];
-      cfg.tailscale.enabled = el('tsEnabled').checked;
-      cfg.tailscale.controlUrl ||= 'https://controlplane.tailscale.com';
-      cfg.tailscale.authKey = val('tsAuthKey');
-      cfg.tailscale.acceptRoutes = true;
-      cfg.tailscale.routes = cfg.tailscale.routes?.length ? cfg.tailscale.routes : ['100.64.0.0/10'];
-      cfg.tailscale.ipv6Routes = cfg.tailscale.ipv6Routes?.length ? cfg.tailscale.ipv6Routes : ['fd7a:115c:a1e0::/48'];
-      cfg.tailscale.magicDnsSuffix = val('tsMagic');
-      cfg.tailscale.domains = val('tsDomains').split(',').map(s => s.trim()).filter(Boolean);
-      cfg.tailscale.inboundForwards = val('tsInboundForwards').split(/\r?\n/).map((line, index) => {
-        if (!line.trim()) return null;
-        const parts = line.split(',').map(s => s.trim());
-        if (parts.length !== 4) throw new Error('Tailnet 入站转发第 ' + (index + 1) + ' 行格式错误');
-        return {name:parts[0], network:parts[1].toLowerCase(), listenPort:Number(parts[2]), target:parts[3]};
-      }).filter(Boolean);
-      cfg.tun.enabled = mode === 'tun';
-      cfg.tun.stack = 'mixed';
-      cfg.tun.autoRoute = mode === 'tun';
-      cfg.tun.autoDetectInterface = true;
-      cfg.tun.strictRoute = false;
-      cfg.dns.enabled = true;
-      cfg.rules.directCidrs ||= ['127.0.0.0/8','10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','169.254.0.0/16'];
-      cfg.rules.directDomains ||= ['localhost','*.local'];
-      el('advancedJson').value = JSON.stringify(storageConfig(cfg), null, 2);
-      return cfg;
-    }
-    function setMode(next){
-      mode = next;
-      el('modeProxy').classList.toggle('active', mode === 'proxy');
-      el('modeTun').classList.toggle('active', mode === 'tun');
-    }
-    function showTab(name){
-      document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
-      document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
-      el('tab-' + name).classList.add('active');
-      if (name === 'advanced') el('advancedJson').value = JSON.stringify(storageConfig(collect()), null, 2);
-      if (name === 'status') refreshStatus();
-    }
-    async function saveQuick(){
-      try {
-        collect();
-        const r = await fetch('/api/config?token=' + encodeURIComponent(token), {method:'POST', headers, body:JSON.stringify({config:cfg})});
-        const text = await responseText(r);
-        if (!r.ok) return err(text);
-        el('advancedJson').value = JSON.stringify(storageConfig(cfg), null, 2);
-        ok(text || '配置已保存');
-        return true;
-      } catch(e) { err(e.message); return false; }
-    }
-    async function saveThen(action,target){
-      if (!await saveQuick()) return;
-      await runAction(action,target);
-    }
-    async function importWireGuard(){
-      const files = Array.from(el('wgFile').files || []);
-      if (!files.length) return err('请选择 WireGuard .conf 文件');
-      if (!await saveQuick()) return;
-      try {
-        info('正在导入 WireGuard...');
-        let imported = 0;
-        for (const file of files) {
-          const content = await file.text();
-          const r = await fetch('/api/wireguard/import?token=' + encodeURIComponent(token), {
-            method:'POST',
-            headers,
-            body:JSON.stringify({name:file.name, content})
-          });
-          const text = await r.text();
-          if (!r.ok) return err(text);
-          const j = JSON.parse(text);
-          cfg = ensure(j.config || cfg);
-          imported++;
-        }
-        fill();
-        ok('WireGuard 已导入: ' + imported + ' 个配置');
-        refreshStatus();
-      } catch(e) { err(e.message); }
-    }
-    async function saveJson(){
-      try {
-        cfg = ensure(JSON.parse(el('advancedJson').value));
-        const r = await fetch('/api/config?token=' + encodeURIComponent(token), {method:'POST', headers, body:JSON.stringify({config:cfg})});
-        const text = await responseText(r);
-        if (!r.ok) return err(text);
-        fill(); ok(text || 'JSON 已保存');
-      } catch(e) { err('JSON 无效: ' + e.message); }
-    }
-    function applyJson(){
-      try { cfg = ensure(JSON.parse(el('advancedJson').value)); fill(); ok('JSON 已应用'); }
-      catch(e) { err('JSON 无效: ' + e.message); }
-    }
-    function refreshWireGuardSummary(){
-      const n = (cfg.wireguard?.configs || []).length;
-      el('wgSummary').textContent = n ? (n + ' 个配置已导入') : '未导入配置';
-    }
-    async function runAction(action,target){
-      info('正在执行...');
-      const r = await fetch('/api/action?token=' + encodeURIComponent(token), {method:'POST', headers, body:JSON.stringify({action, target:target || ''})});
-      const text = await responseText(r);
-      if (!r.ok) err(text); else ok(text);
-      if (action === 'start' || action === 'stop' || action === 'proxy-on' || action === 'proxy-off') refreshStatus();
-    }
-    async function refreshStatus(){
-      const r = await fetch('/api/status?token=' + encodeURIComponent(token));
-      const text = await r.text();
-      if (!r.ok) return err(text);
-      const data = JSON.parse(text);
-      el('statusCards').innerHTML = (data.items || []).map(item =>
-        '<div class="metric ' + escapeHtml(item.state || '') + '">' +
-        '<div class="label">' + escapeHtml(item.label) + '</div>' +
-        '<div class="value">' + escapeHtml(item.value) + '</div>' +
-        '<div class="detail">' + escapeHtml(item.detail || '') + '</div>' +
-        '</div>'
-      ).join('');
-      el('statusLogs').innerHTML = (data.logs || []).map(line =>
-        '<div class="logline">' + escapeHtml(line) + '</div>'
-      ).join('');
-    }
-    async function responseText(r){
-      const text = await r.text();
-      try { const j = JSON.parse(text); return j.message || JSON.stringify(j, null, 2); }
-      catch { return text; }
-    }
-    function escapeHtml(s){
-      return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-    }
-    load().catch(e => err(e.message));
-  </script>
-</body>
-</html>`
+//go:embed index.html
+var indexHTML string

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/meshmux/meshmux/internal/fileutil"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const maxLogLineBytes = 64 * 1024
@@ -354,4 +356,19 @@ func readFileTail(path string, maxBytes int64) ([]byte, error) {
 		return nil, err
 	}
 	return data[:n], nil
+}
+
+func AppendDiagnosticLog(path, message string) error {
+	unlock, err := fileutil.TryLock(path + ".lock")
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	writer, err := newSanitizedRotatingLog(path, runnerLogPolicy)
+	if err != nil {
+		return err
+	}
+	_, writeErr := fmt.Fprintf(writer, "%s %s\n", time.Now().Format(time.RFC3339), RedactLogText(message))
+	closeErr := writer.Close()
+	return errors.Join(writeErr, closeErr)
 }

@@ -1,7 +1,7 @@
 #define MyAppName "MeshMux"
 #define MyAppVersion GetEnv("MESHMUX_VERSION")
 #if MyAppVersion == ""
-#define MyAppVersion "0.3.0"
+#error MESHMUX_VERSION must be set explicitly; do not package an unidentified build
 #endif
 #define MyAppPublisher "lumokato"
 #define MyAppURL "https://github.com/lumokato/MeshMux"

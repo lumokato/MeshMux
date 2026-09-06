@@ -75,7 +75,7 @@ rules:
 		t.Fatal(err)
 	}
 	text := string(got)
-	if !strings.Contains(text, "proxies:\n  - name: node-a") {
+	if !strings.Contains(text, `"name":"node-a"`) {
 		t.Fatalf("normalized provider missing node: %s", text)
 	}
 	if strings.Contains(text, "proxy-groups:") || strings.Contains(text, "rules:") {
@@ -162,5 +162,30 @@ func TestTailscaleInboundForwardsOnlyRenderForWindows(t *testing.T) {
 	}
 	if strings.Contains(mobile, "inbound-forwards:") {
 		t.Fatalf("mobile profile contains Windows inbound forwards:\n%s", mobile)
+	}
+}
+
+func TestProviderYAMLFormats(t *testing.T) {
+	for _, input := range []string{
+		"proxies:\n- type: ss\n  name: node-a\n  server: example.test\n",
+		"proxies: [{type: ss, name: node-a, server: example.test}]\n",
+		"- type: ss\n  name: node-a\n  server: example.test\n",
+	} {
+		data, err := normalizeProviderData([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")[1:]
+		names := providerNodeNames(lines)
+		if len(names) != 1 || names[0] != "node-a" {
+			t.Fatalf("names=%v", names)
+		}
+	}
+}
+func TestProviderYAMLRejectsMalformedAndDuplicateNodes(t *testing.T) {
+	for _, input := range []string{"proxies: [", "proxies: [{type: ss}]", "proxies: [{name: a}, {name: a}]", "proxies: [{name: a}]\n---\nproxies: [{name: b}]", "proxies: [{name: a, name: b}]"} {
+		if _, err := normalizeProviderData([]byte(input)); err == nil {
+			t.Fatalf("invalid provider accepted: %s", input)
+		}
 	}
 }

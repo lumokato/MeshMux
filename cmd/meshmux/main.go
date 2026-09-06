@@ -23,7 +23,7 @@ import (
 	"github.com/meshmux/meshmux/internal/webui"
 )
 
-var version = "0.3.0"
+var version = "dev"
 
 func main() {
 	err := run(os.Args[1:])
@@ -549,27 +549,23 @@ func optionValue(args []string, name string) string {
 }
 
 func enterRuntimeDir(configPath string) error {
-	dataDir := config.LocalDataDir()
-	if dataDir == "" {
-		return nil
-	}
 	configAbs, err := filepath.Abs(configPath)
 	if err != nil {
 		return err
 	}
-	dataAbs, err := filepath.Abs(dataDir)
-	if err != nil {
+	runtimeDir := filepath.Dir(filepath.Clean(configAbs))
+	if runtime.GOOS == "linux" {
+		if home := strings.TrimSpace(os.Getenv("MESHMUX_HOME")); home != "" {
+			if !filepath.IsAbs(home) {
+				return fmt.Errorf("MESHMUX_HOME must be absolute")
+			}
+			runtimeDir = filepath.Clean(home)
+		}
+	}
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
 		return err
 	}
-	configAbs = filepath.Clean(configAbs)
-	dataAbs = filepath.Clean(dataAbs)
-	if samePath(configAbs, filepath.Join(dataAbs, config.DefaultConfigPath)) || isPathInside(configAbs, dataAbs) {
-		if err := os.MkdirAll(dataAbs, 0755); err != nil {
-			return err
-		}
-		return os.Chdir(dataAbs)
-	}
-	return nil
+	return os.Chdir(runtimeDir)
 }
 
 func samePath(a, b string) bool {
@@ -577,14 +573,6 @@ func samePath(a, b string) bool {
 		return true
 	}
 	return filepath.Clean(a) == filepath.Clean(b)
-}
-
-func isPathInside(path, dir string) bool {
-	rel, err := filepath.Rel(dir, path)
-	if err != nil {
-		return false
-	}
-	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
 }
 
 func commandArg(args []string, fallback string) string {

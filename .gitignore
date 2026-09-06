@@ -7,6 +7,16 @@ secrets/
 build/
 release/
 dist/
+.local-history/
+.verification/
+docs/DEPLOYMENT-*.md
+downloads/
+meshmux.local.json
+profiles/
+providers/
+wireguard/
+state/
+logs/
 *.exe
 *.pdb
 

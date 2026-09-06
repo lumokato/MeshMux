@@ -10,7 +10,7 @@ import (
 	"github.com/meshmux/meshmux/internal/config"
 )
 
-func TestPublishSubStoreFileUpdatesDetectedExistingFile(t *testing.T) {
+func TestPublishSubStoreFileDoesNotGuessExistingFile(t *testing.T) {
 	dir := t.TempDir()
 	input := filepath.Join(dir, "mobile.yaml")
 	if err := os.WriteFile(input, []byte("proxies: []\n"), 0600); err != nil {
@@ -22,7 +22,7 @@ func TestPublishSubStoreFileUpdatesDetectedExistingFile(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/files":
 			_, _ = w.Write([]byte(`{"data":[{"name":"existing-mobile"}]}`))
-		case r.Method == http.MethodPatch && r.URL.Path == "/api/file/existing-mobile":
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/file/meshmux-mobile":
 			patched = true
 			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/files":
@@ -46,21 +46,18 @@ func TestPublishSubStoreFileUpdatesDetectedExistingFile(t *testing.T) {
 	if !patched || posted {
 		t.Fatalf("patched=%t posted=%t", patched, posted)
 	}
-	if result.FileName != "existing-mobile" || result.StatusCode != http.StatusOK {
+	if result.FileName != "meshmux-mobile" || result.StatusCode != http.StatusOK {
 		t.Fatalf("result = %+v", result)
 	}
 }
 
-func TestSubStoreFileItemsSupportsCommonShapes(t *testing.T) {
-	cases := []any{
-		[]any{map[string]any{"name": "a"}},
-		map[string]any{"data": []any{map[string]any{"name": "b"}}},
-		map[string]any{"files": []any{map[string]any{"name": "c"}}},
-		map[string]any{"name": "d"},
+func TestSubStoreNamedFileURLPreservesEncodingAndQuery(t *testing.T) {
+	got, err := subStoreNamedFileURL("https://example.test/api/files?token=test", "mobile name/a")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		if got := subStoreFileItems(tc); len(got) != 1 {
-			t.Fatalf("items for %#v = %#v", tc, got)
-		}
+	want := "https://example.test/api/file/mobile%20name%2Fa?token=test"
+	if got != want {
+		t.Fatalf("got %s, want %s", got, want)
 	}
 }

@@ -122,6 +122,56 @@ func TestConfigCheckReportsCompletenessWithoutSecrets(t *testing.T) {
 	}
 }
 
+func TestConfigCheckResolvesAssetsRelativeToExplicitConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("MESHMUX_HOME", "")
+	if err := os.MkdirAll(filepath.Join(home, "providers"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "wireguard"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "providers", "main.yaml"), []byte("proxies:\n  - name: node\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "wireguard", "home.conf"), []byte("private material"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{
+		Providers: []config.Provider{{Name: "main", Path: filepath.Join("providers", "main.yaml")}},
+		WireGuard: config.WireGuard{Configs: []string{filepath.Join("wireguard", "home.conf")}},
+	}
+	cfg.Setup.AllowDirectOnly = true
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, config.DefaultConfigPath)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	var output bytes.Buffer
+	if err := checkConfig([]string{"-config", path}, &output); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"daily-proxy-cache: configured", "wireguard-configs: 1/1 available", "result: ready"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("config-check output missing %q: %s", want, text)
+		}
+	}
+}
 func TestConfigCheckRejectsMissingDailyProxyAndTailnetAuth(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("MESHMUX_HOME", home)

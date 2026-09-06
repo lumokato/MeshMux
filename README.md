@@ -6,6 +6,10 @@ Windows 安装版将核心注册为自动启动的系统服务，未登录桌面
 
 English README: [README.en.md](README.en.md)
 
+## 开发与版本入口
+
+源码结构、修复记录与剩余风险见 [架构说明](docs/ARCHITECTURE.md)；当前源码、核心配对、历史归档和构建规则见 [开发指南](docs/DEVELOPMENT.md)。本地未发布改动不等于已安装版本，历史安装包不得作为默认启动或打包来源。
+
 ## 功能
 
 - 常驻任务栏，启动、停止和重启 mihomo。
@@ -95,4 +99,4 @@ Android 端使用 mobile profile 接入同一套配置。MeshMux 负责生成可
 
 MeshMux 使用 MIT 许可证。安装包内置组件见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-补丁版 Mihomo 基于上游 `v1.19.29`，作为 [MeshMux 固定核心资产](https://github.com/lumokato/MeshMux/releases/tag/mihomo-v1.19.29-meshmux.1) 发布，包含二进制和对应源码包。MeshMux CI 只下载固定资产并校验 SHA-256，不在每次应用发版时重新编译完整核心。
+补丁版 Mihomo 基于上游 `v1.19.29`，作为 [MeshMux 固定核心资产](https://github.com/lumokato/MeshMux/releases/tag/mihomo-v1.19.29-meshmux.2) 发布，包含二进制和对应源码包。Windows/Linux CI 下载各自固定核心二进制并校验 SHA-256；对应源码在同一核心发布中提供。

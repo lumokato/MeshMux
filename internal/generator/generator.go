@@ -9,12 +9,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/meshmux/meshmux/internal/config"
+	"github.com/meshmux/meshmux/internal/fileutil"
+	"gopkg.in/yaml.v3"
 )
 
 var errMissingProvider = errors.New("missing daily proxy provider")
@@ -44,6 +45,11 @@ func GenerateNamed(cfg *config.Config, name string) (string, error) {
 }
 
 func GenerateTarget(cfg *config.Config, target config.Target) (string, error) {
+	unlock, err := fileutil.TryLock(filepath.Join("state", "generation.lock"))
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	if target.Output == "" {
 		return "", fmt.Errorf("target %q has empty output", target.Name)
 	}
@@ -57,7 +63,7 @@ func GenerateTarget(cfg *config.Config, target config.Target) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(target.Output), 0755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(target.Output, []byte(yaml), 0600); err != nil {
+	if err := fileutil.WriteFile(target.Output, []byte(yaml), 0600); err != nil {
 		return "", err
 	}
 	return target.Output, nil
@@ -75,7 +81,7 @@ func ensureProviderCaches(cfg *config.Config) error {
 		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
 			normalized, normalizeErr := normalizeProviderData(data)
 			if normalizeErr == nil {
-				if err := os.WriteFile(path, normalized, 0600); err != nil {
+				if err := fileutil.WriteFile(path, normalized, 0600); err != nil {
 					return err
 				}
 				available++
@@ -99,7 +105,7 @@ func ensureProviderCaches(cfg *config.Config) error {
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(path, normalized, 0600); err != nil {
+		if err := fileutil.WriteFile(path, normalized, 0600); err != nil {
 			return err
 		}
 		available++
@@ -111,6 +117,11 @@ func ensureProviderCaches(cfg *config.Config) error {
 }
 
 func RefreshProviders(cfg *config.Config) error {
+	unlock, err := fileutil.TryLock(filepath.Join("state", "generation.lock"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return ensureProviderCaches(cfg)
 }
 
@@ -136,9 +147,12 @@ func fetchProvider(rawURL string) ([]byte, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(data) > 16*1024*1024 {
+		return nil, errors.New("provider response exceeds 16 MiB")
 	}
 	if len(data) == 0 {
 		return nil, fmt.Errorf("空响应")
@@ -147,97 +161,61 @@ func fetchProvider(rawURL string) ([]byte, error) {
 }
 
 func normalizeProviderData(data []byte) ([]byte, error) {
-	text := strings.TrimPrefix(string(data), "\ufeff")
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
-	if block, ok := extractTopLevelProxies(text); ok {
-		normalized := strings.TrimRight(block, "\n") + "\n"
-		if countProviderNodes(normalized) == 0 {
-			return nil, fmt.Errorf("返回内容没有可用节点")
-		}
-		return []byte(normalized), nil
+	var document yaml.Node
+	decoder := yaml.NewDecoder(strings.NewReader(strings.TrimPrefix(string(data), "\ufeff")))
+	if err := decoder.Decode(&document); err != nil {
+		return nil, fmt.Errorf("invalid provider YAML: %w", err)
 	}
-	if list, ok := extractTopLevelProxyList(text); ok {
-		normalized := "proxies:\n" + list
-		if countProviderNodes(normalized) == 0 {
-			return nil, fmt.Errorf("返回内容没有可用节点")
-		}
-		return []byte(normalized), nil
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, errors.New("provider must contain one YAML document")
 	}
-	return nil, fmt.Errorf("返回内容不是 mihomo 节点列表")
-}
-
-func extractTopLevelProxies(text string) (string, bool) {
-	lines := strings.Split(text, "\n")
-	start := -1
-	for i, line := range lines {
-		if hasLeadingSpace(line) {
-			continue
-		}
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "proxies:") {
-			start = i
-			break
-		}
+	if len(document.Content) != 1 {
+		return nil, errors.New("empty provider")
 	}
-	if start < 0 {
-		return "", false
-	}
-	end := len(lines)
-	for i := start + 1; i < len(lines); i++ {
-		trimmed := strings.TrimSpace(lines[i])
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if !hasLeadingSpace(lines[i]) && strings.Contains(trimmed, ":") {
-			end = i
-			break
-		}
-	}
-	return strings.Join(lines[start:end], "\n"), true
-}
-
-func extractTopLevelProxyList(text string) (string, bool) {
-	lines := strings.Split(text, "\n")
-	var out []string
-	started := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			if started {
-				out = append(out, "")
+	proxies := document.Content[0]
+	if proxies.Kind == yaml.MappingNode {
+		var selected *yaml.Node
+		for index := 0; index+1 < len(proxies.Content); index += 2 {
+			if proxies.Content[index].Value == "proxies" {
+				if selected != nil {
+					return nil, errors.New("duplicate proxies key")
+				}
+				selected = proxies.Content[index+1]
 			}
-			continue
 		}
-		if !started {
-			if !strings.HasPrefix(trimmed, "- ") {
-				return "", false
-			}
-			started = true
-		}
-		if !hasLeadingSpace(line) && !strings.HasPrefix(trimmed, "- ") {
-			return "", false
-		}
-		out = append(out, "  "+line)
+		proxies = selected
 	}
-	if len(out) == 0 {
-		return "", false
+	if proxies == nil || proxies.Kind != yaml.SequenceNode || len(proxies.Content) == 0 {
+		return nil, errors.New("provider has no proxy nodes")
 	}
-	return strings.Join(out, "\n") + "\n", true
-}
-
-func hasLeadingSpace(line string) bool {
-	return strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")
-}
-
-func countProviderNodes(text string) int {
-	count := 0
-	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "- ") {
-			count++
+	seen := map[string]bool{}
+	nodes := make([]map[string]any, 0, len(proxies.Content))
+	for _, node := range proxies.Content {
+		var proxy map[string]any
+		if err := node.Decode(&proxy); err != nil {
+			return nil, fmt.Errorf("invalid proxy: %w", err)
 		}
+		name, ok := proxy["name"].(string)
+		if !ok || strings.TrimSpace(name) == "" {
+			return nil, errors.New("proxy name is required")
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("duplicate proxy name %q", name)
+		}
+		seen[name] = true
+		nodes = append(nodes, proxy)
 	}
-	return count
+	var out strings.Builder
+	out.WriteString("proxies:\n")
+	for _, proxy := range nodes {
+		encoded, err := json.Marshal(proxy)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(&out, "  - %s\n", encoded)
+	}
+	return []byte(out.String()), nil
 }
 
 func Render(cfg *config.Config, target config.Target) (string, error) {
@@ -330,55 +308,22 @@ func loadProviderProxies(providers []config.Provider) ([]string, []string, error
 	return lines, names, nil
 }
 
-var (
-	blockNodeNamePattern  = regexp.MustCompile(`^\s*-\s*name\s*:\s*(.+?)\s*$`)
-	inlineNodeNamePattern = regexp.MustCompile(`(?i)(?:^|[,{]\s*)["']?name["']?\s*:\s*(?:"([^"]*)"|'([^']*)'|([^,}]+))`)
-)
-
 func providerNodeNames(lines []string) []string {
+	var proxies []struct {
+		Name string `yaml:"name"`
+	}
+	if err := yaml.Unmarshal([]byte(strings.Join(lines, "\n")), &proxies); err != nil {
+		return nil
+	}
 	var names []string
 	seen := map[string]bool{}
-	for _, line := range lines {
-		var raw string
-		item := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "-"))
-		if strings.HasPrefix(item, "{") {
-			var node map[string]any
-			if err := json.Unmarshal([]byte(item), &node); err == nil {
-				if name, ok := node["name"]; ok {
-					raw = fmt.Sprint(name)
-				}
-			}
+	for _, proxy := range proxies {
+		if proxy.Name != "" && !seen[proxy.Name] {
+			names = append(names, proxy.Name)
+			seen[proxy.Name] = true
 		}
-		if raw == "" {
-			raw = inlineName(line)
-		}
-		if raw == "" {
-			match := blockNodeNamePattern.FindStringSubmatch(line)
-			if len(match) == 2 {
-				raw = match[1]
-			}
-		}
-		name := strings.Trim(strings.TrimSpace(raw), `"'`)
-		if name == "" || seen[name] {
-			continue
-		}
-		seen[name] = true
-		names = append(names, name)
 	}
 	return names
-}
-
-func inlineName(line string) string {
-	match := inlineNodeNamePattern.FindStringSubmatch(line)
-	if len(match) == 0 {
-		return ""
-	}
-	for _, group := range match[1:] {
-		if strings.TrimSpace(group) != "" {
-			return group
-		}
-	}
-	return ""
 }
 
 func renderTUN(b *strings.Builder, cfg *config.Config, target config.Target) {

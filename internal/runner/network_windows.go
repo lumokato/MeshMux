@@ -3,8 +3,11 @@
 package runner
 
 import (
+	"context"
 	"fmt"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/meshmux/meshmux/internal/config"
 )
@@ -24,7 +27,11 @@ func postStartNetwork(cfg *config.Config) error {
 	}
 
 	script := buildPostStartNetworkScript(routes, dnsDisabled(cfg), !cfg.TUN.AutoRoute)
-	cmd := hiddenCommand("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+	hideWindow(cmd)
+	cmd.WaitDelay = time.Second
 	out, err := cmd.CombinedOutput()
 	text := strings.TrimSpace(string(out))
 	if text != "" {

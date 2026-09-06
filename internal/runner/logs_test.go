@@ -143,3 +143,27 @@ func TestRecentLogTextReadsOnlyTailAndRedacts(t *testing.T) {
 		t.Fatalf("unexpected log tail: %q", text)
 	}
 }
+
+func TestDiagnosticLogRotatesAndRedacts(t *testing.T) {
+	old := runnerLogPolicy
+	runnerLogPolicy = logPolicy{maxBytes: 128, backups: 2}
+	t.Cleanup(func() { runnerLogPolicy = old })
+	path := filepath.Join(t.TempDir(), "service.log")
+	for index := 0; index < 12; index++ {
+		if err := AppendDiagnosticLog(path, "token=private-test-token"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, candidate := range []string{path, path + ".1", path + ".2"} {
+		data, err := os.ReadFile(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(data) > 128 || strings.Contains(string(data), "private-test-token") {
+			t.Fatal("unsafe log")
+		}
+	}
+	if _, err := os.Stat(path + ".3"); !os.IsNotExist(err) {
+		t.Fatal("too many backups")
+	}
+}

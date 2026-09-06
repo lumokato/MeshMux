@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/meshmux/meshmux/internal/fileutil"
 )
 
 const (
@@ -19,9 +21,9 @@ const (
 	DefaultConfigPath               = "meshmux.local.json"
 	ExampleConfigPath               = "templates/meshmux.example.json"
 	DefaultMihomoRepo               = "lumokato/MeshMux"
-	DefaultMihomoReleaseTag         = "mihomo-v1.19.29-meshmux.1"
-	DefaultMihomoAssetPattern       = `mihomo-windows-amd64-compatible-v1\.19\.29-meshmux\.1\.zip$`
-	LinuxMihomoAssetPattern         = `mihomo-linux-amd64-compatible-v1\.19\.29-meshmux\.1\.gz$`
+	DefaultMihomoReleaseTag         = "mihomo-v1.19.29-meshmux.2"
+	DefaultMihomoAssetPattern       = `mihomo-windows-amd64-compatible-v1\.19\.29-meshmux\.2\.zip$`
+	LinuxMihomoAssetPattern         = `mihomo-linux-amd64-compatible-v1\.19\.29-meshmux\.2\.gz$`
 	OfficialMihomoRepo              = "MetaCubeX/mihomo"
 	OfficialLinuxMihomoAssetPattern = `mihomo-linux-amd64-compatible.*\.gz$`
 )
@@ -153,6 +155,7 @@ type Component struct {
 	Repo         string `json:"repo"`
 	ReleaseTag   string `json:"releaseTag,omitempty"`
 	AssetPattern string `json:"assetPattern"`
+	SHA256       string `json:"sha256,omitempty"`
 }
 
 func ResolveConfigPath(path string) string {
@@ -254,13 +257,6 @@ func ensureLocalConfigAt(dir string, legacyDirs []string, examplePath string) (s
 	if examplePath == "" {
 		examplePath = ExampleConfigPath
 	}
-	exampleData, err := os.ReadFile(examplePath)
-	if err != nil {
-		exampleData, err = os.ReadFile(ExampleConfigPath)
-		if err != nil {
-			return "", err
-		}
-	}
 
 	currentData, currentErr := os.ReadFile(path)
 	if currentErr == nil && !IsBootstrapConfig(currentData) {
@@ -292,6 +288,13 @@ func ensureLocalConfigAt(dir string, legacyDirs []string, examplePath string) (s
 
 	if currentErr == nil {
 		return path, nil
+	}
+	exampleData, err := os.ReadFile(examplePath)
+	if err != nil {
+		exampleData, err = os.ReadFile(ExampleConfigPath)
+		if err != nil {
+			return "", err
+		}
 	}
 	return path, writeConfigFile(path, exampleData)
 }
@@ -344,30 +347,7 @@ func IsBootstrapConfig(data []byte) bool {
 }
 
 func writeConfigFile(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	temp, err := os.CreateTemp(filepath.Dir(path), ".config-*")
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	defer os.Remove(tempPath)
-	if err := temp.Chmod(0600); err != nil {
-		temp.Close()
-		return err
-	}
-	if _, err := temp.Write(data); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return os.Rename(tempPath, path)
+	return fileutil.WriteFile(path, data, 0600)
 }
 
 func copyMissingTree(source, destination string) error {
@@ -496,6 +476,13 @@ func defaultMihomoComponent(component Component) bool {
 }
 
 func legacyMihomoComponent(goos string, component Component) bool {
+	// Upgrade the released default, but preserve explicitly pinned/custom cores.
+	if component.Repo == DefaultMihomoRepo && component.ReleaseTag == "mihomo-v1.19.29-meshmux.1" && component.SHA256 == "" {
+		switch component.AssetPattern {
+		case "", `mihomo-windows-amd64-compatible-v1\.19\.29-meshmux\.1\.zip$`, `mihomo-linux-amd64-compatible-v1\.19\.29-meshmux\.1\.gz$`:
+			return true
+		}
+	}
 	switch component.Repo {
 	case OfficialMihomoRepo:
 		switch component.AssetPattern {
@@ -542,6 +529,20 @@ func mihomoAssetPatternFor(goos, repo string) string {
 }
 
 func (c *Config) Validate() error {
+	if c.Ports.Mixed != 0 && (c.Ports.Mixed < 1 || c.Ports.Mixed > 65535) {
+		return errors.New("mixed port must be in 1-65535")
+	}
+	if c.Ports.Controller != "" {
+		host, port, err := net.SplitHostPort(c.Ports.Controller)
+		ip := net.ParseIP(host)
+		number, portErr := strconv.Atoi(port)
+		if err != nil || ip == nil || !ip.IsLoopback() || portErr != nil || number < 1 || number > 65535 {
+			return errors.New("unauthenticated controller must use a loopback IP and a port in 1-65535")
+		}
+		if number == c.Ports.Mixed {
+			return errors.New("controller and mixed ports must differ")
+		}
+	}
 	if len(c.Tailscale.InboundForwards) > 0 && !c.Tailscale.Enabled {
 		return errors.New("Tailnet 入站转发要求先启用 Tailscale")
 	}

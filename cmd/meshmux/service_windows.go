@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/meshmux/meshmux/internal/config"
+	"github.com/meshmux/meshmux/internal/fileutil"
 	"github.com/meshmux/meshmux/internal/generator"
 	"github.com/meshmux/meshmux/internal/runner"
 	"github.com/meshmux/meshmux/internal/winservice"
@@ -49,8 +50,15 @@ type serviceHandler struct {
 	configPath string
 }
 
+const (
+	powerEventResumeSuspend   = 7
+	powerEventResumeAutomatic = 18
+)
+
+var serviceResumeDelay = 5 * time.Second
+
 func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
-	const accepts = svc.AcceptStop | svc.AcceptShutdown
+	const accepts = svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPowerEvent
 	changes <- svc.Status{State: svc.StartPending}
 
 	cfg, _, err := load(configArgs(h.configPath))
@@ -64,26 +72,27 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 		return serviceFailure(h.configPath, "find generated profile", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ready := make(chan error, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- runServiceCore(ctx, cfg, profile, func(int) error {
-			ready <- nil
-			return nil
-		})
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			return serviceFailure(h.configPath, "start core", err)
-		}
-		return false, 0
-	case <-ready:
-		changes <- svc.Status{State: svc.Running, Accepts: accepts}
+	core, err := startServiceCore(cfg, profile, 15*time.Second)
+	if err != nil {
+		return serviceFailure(h.configPath, "start core", err)
 	}
+	defer func() { core.cancel() }()
+	changes <- svc.Status{State: svc.Running, Accepts: accepts}
+
+	var resumeTimer *time.Timer
+	var resume <-chan time.Time
+	stopResumeTimer := func() {
+		if resumeTimer != nil {
+			if !resumeTimer.Stop() {
+				select {
+				case <-resumeTimer.C:
+				default:
+				}
+			}
+		}
+		resume = nil
+	}
+	defer stopResumeTimer()
 
 	for {
 		select {
@@ -91,26 +100,85 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 			switch request.Cmd {
 			case svc.Interrogate:
 				changes <- request.CurrentStatus
+			case svc.PowerEvent:
+				if !isResumePowerEvent(request.EventType) {
+					continue
+				}
+				stopResumeTimer()
+				resumeTimer = time.NewTimer(serviceResumeDelay)
+				resume = resumeTimer.C
 			case svc.Stop, svc.Shutdown:
+				stopResumeTimer()
 				changes <- svc.Status{State: svc.StopPending}
-				cancel()
-				select {
-				case err := <-done:
-					if err != nil {
-						return serviceFailure(h.configPath, "stop core", err)
-					}
-				case <-time.After(15 * time.Second):
-					return serviceFailure(h.configPath, "stop core", errors.New("timed out after 15 seconds"))
+				if err := stopServiceCore(core, 15*time.Second); err != nil {
+					return serviceFailure(h.configPath, "stop core", err)
 				}
 				return false, 0
 			}
-		case err := <-done:
+		case <-resume:
+			resume = nil
+			appendServiceLog(h.configPath, "power resume: restarting core")
+			if err := stopServiceCore(core, 15*time.Second); err != nil {
+				return serviceFailure(h.configPath, "restart core after resume", err)
+			}
+			replacement, err := startServiceCore(cfg, profile, 15*time.Second)
+			if err != nil {
+				return serviceFailure(h.configPath, "restart core after resume", err)
+			}
+			core = replacement
+			appendServiceLog(h.configPath, "power resume: core restarted")
+		case err := <-core.done:
 			if err != nil {
 				return serviceFailure(h.configPath, "run core", err)
 			}
 			return false, 0
 		}
 	}
+}
+
+type serviceCore struct {
+	cancel context.CancelFunc
+	done   chan error
+}
+
+func startServiceCore(cfg *config.Config, profile string, timeout time.Duration) (*serviceCore, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- runServiceCore(ctx, cfg, profile, func(int) error {
+			ready <- struct{}{}
+			return nil
+		})
+	}()
+	core := &serviceCore{cancel: cancel, done: done}
+	select {
+	case err := <-done:
+		cancel()
+		if err == nil {
+			err = errors.New("core exited before reporting ready")
+		}
+		return nil, err
+	case <-ready:
+		return core, nil
+	case <-time.After(timeout):
+		cancel()
+		return nil, fmt.Errorf("timed out after %s", timeout)
+	}
+}
+
+func stopServiceCore(core *serviceCore, timeout time.Duration) error {
+	core.cancel()
+	select {
+	case err := <-core.done:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("timed out after %s", timeout)
+	}
+}
+
+func isResumePowerEvent(eventType uint32) bool {
+	return eventType == powerEventResumeSuspend || eventType == powerEventResumeAutomatic
 }
 
 var runServiceCore = func(ctx context.Context, cfg *config.Config, profile string, ready func(int) error) error {
@@ -139,6 +207,13 @@ func manageWindowsService(args []string) error {
 		return err
 	}
 	action = strings.ToLower(strings.TrimSpace(action))
+	if action != "status" {
+		unlock, err := fileutil.TryLock(filepath.Join(winservice.DataDir(), "service-operation.lock"))
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
 
 	switch action {
 	case "install", "activate", "activate-if-ready":
@@ -157,6 +232,16 @@ func manageWindowsService(args []string) error {
 		)
 		if err != nil {
 			return err
+		}
+		if windowsServiceInstalled() {
+			snapshotPath := filepath.Join(winservice.DataDir(), config.DefaultConfigPath)
+			if err := installWindowsService(executable, snapshotPath); err != nil {
+				return err
+			}
+			if action == "install" {
+				return nil
+			}
+			return restartWindowsService("restart", path)
 		}
 		snapshotPath, err := prepareServiceSnapshotFiles(path)
 		if err != nil {
@@ -223,7 +308,10 @@ func activateWindowsService(sourcePath string) error {
 		return fmt.Errorf("stop existing user core: %w", err)
 	}
 	if _, err := prepareWindowsSnapshot(sourcePath); err != nil {
-		return fmt.Errorf("prepare service snapshot: %w", err)
+		if restoreErr := startUserCore(cfg, configPath, profile); restoreErr != nil {
+			return fmt.Errorf("prepare snapshot: %v; restore user core: %w", err, restoreErr)
+		}
+		return fmt.Errorf("prepare snapshot: %w; previous user core was restored", err)
 	}
 	startErr := controlWindowsService("start", 30*time.Second)
 	if startErr == nil {
@@ -248,12 +336,9 @@ func restartWindowsService(action, sourcePath string) error {
 	if err != nil {
 		return err
 	}
-	backup, err := captureServiceSnapshot()
+	backup, err := captureServiceSnapshot(cfg)
 	if err != nil {
 		return fmt.Errorf("backup service snapshot: %w", err)
-	}
-	if _, err := prepareWindowsSnapshot(sourcePath); err != nil {
-		return fmt.Errorf("prepare service snapshot: %w", err)
 	}
 	if action == "restart" {
 		if err := controlWindowsService("stop", 30*time.Second); err != nil {
@@ -266,6 +351,9 @@ func restartWindowsService(action, sourcePath string) error {
 	}
 	if err := stopUserCore(cfg); err != nil {
 		return restoreStoppedService(backup, fmt.Errorf("stop existing user core: %w", err))
+	}
+	if _, err := prepareWindowsSnapshot(sourcePath); err != nil {
+		return restoreStoppedService(backup, fmt.Errorf("prepare service snapshot: %w", err))
 	}
 	if err := controlWindowsService("start", 30*time.Second); err != nil {
 		return restoreStoppedService(backup, fmt.Errorf("start service: %w", err))
@@ -283,14 +371,59 @@ type snapshotFileBackup struct {
 	exists bool
 }
 
-func captureServiceSnapshot() ([]snapshotFileBackup, error) {
+func captureServiceSnapshot(incoming ...*config.Config) ([]snapshotFileBackup, error) {
 	home := winservice.DataDir()
 	paths := []string{
 		filepath.Join(home, config.DefaultConfigPath),
 		filepath.Join(home, "profiles", "windows.yaml"),
 	}
+	for _, directory := range []string{"providers", "wireguard"} {
+		root := filepath.Join(home, directory)
+		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if entry.Type()&os.ModeSymlink != 0 {
+				return fmt.Errorf("snapshot links are not supported: %s", path)
+			}
+			if !entry.IsDir() {
+				paths = append(paths, path)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, cfg := range incoming {
+		references := append([]string{}, cfg.WireGuard.Configs...)
+		for _, provider := range cfg.Providers {
+			path := provider.Path
+			if path == "" && provider.Name != "" {
+				path = filepath.Join("providers", provider.Name+".yaml")
+			}
+			if path != "" {
+				references = append(references, path)
+			}
+		}
+		for _, path := range references {
+			if !filepath.IsLocal(path) {
+				return nil, fmt.Errorf("snapshot asset must stay inside data directory: %s", path)
+			}
+			paths = append(paths, filepath.Join(home, path))
+		}
+	}
+	seen := map[string]bool{}
 	backup := make([]snapshotFileBackup, 0, len(paths))
 	for _, path := range paths {
+		key := strings.ToLower(filepath.Clean(path))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		data, err := os.ReadFile(path)
 		if os.IsNotExist(err) {
 			backup = append(backup, snapshotFileBackup{path: path})
@@ -350,15 +483,12 @@ func waitForWindowsService(cfg *config.Config, timeout time.Duration) error {
 
 func serviceFailure(configPath, stage string, err error) (bool, uint32) {
 	message := fmt.Sprintf("%s: %v", strings.TrimSpace(stage), err)
-	logDir := filepath.Join(filepath.Dir(configPath), "logs")
-	if mkdirErr := os.MkdirAll(logDir, 0700); mkdirErr == nil {
-		path := filepath.Join(logDir, "service.log")
-		if file, openErr := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); openErr == nil {
-			_, _ = fmt.Fprintf(file, "%s %s\n", time.Now().Format(time.RFC3339), message)
-			_ = file.Close()
-		}
-	}
+	appendServiceLog(configPath, message)
 	return true, 1
+}
+
+func appendServiceLog(configPath, message string) {
+	_ = runner.AppendDiagnosticLog(filepath.Join(filepath.Dir(configPath), "logs", "service.log"), message)
 }
 
 func writeWindowsCommandError(args []string, err error) {
@@ -369,16 +499,7 @@ func writeWindowsCommandError(args []string, err error) {
 	if configPath := strings.TrimSpace(configPathArg(args)); configPath != "" {
 		dataDir = filepath.Dir(configPath)
 	}
-	if mkdirErr := os.MkdirAll(filepath.Join(dataDir, "logs"), 0700); mkdirErr != nil {
-		return
-	}
-	path := filepath.Join(dataDir, "logs", "service-command.log")
-	file, openErr := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-	if openErr != nil {
-		return
-	}
-	defer file.Close()
-	_, _ = fmt.Fprintf(file, "%s %s: %v\n", time.Now().Format(time.RFC3339), strings.Join(args, " "), err)
+	_ = runner.AppendDiagnosticLog(filepath.Join(dataDir, "logs", "service-command.log"), fmt.Sprintf("%s: %v", strings.Join(args, " "), err))
 }
 
 func writeWindowsCommandResult(args []string, commandErr error) {
@@ -397,7 +518,7 @@ func prepareServiceSnapshot(sourcePath string) (string, error) {
 	return prepareServiceSnapshotFiles(sourcePath)
 }
 
-func prepareServiceSnapshotFiles(sourcePath string) (string, error) {
+func prepareServiceSnapshotFiles(sourcePath string) (result string, resultErr error) {
 	sourcePath, err := filepath.Abs(sourcePath)
 	if err != nil {
 		return "", err
@@ -421,6 +542,17 @@ func prepareServiceSnapshotFiles(sourcePath string) (string, error) {
 	if err := winservice.SecureDataDir(dataDir); err != nil {
 		return "", err
 	}
+	backup, err := captureServiceSnapshot(cfg)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if resultErr != nil {
+			if restoreErr := restoreServiceSnapshot(backup); restoreErr != nil {
+				resultErr = fmt.Errorf("%v; snapshot rollback failed: %w", resultErr, restoreErr)
+			}
+		}
+	}()
 	profilePath := filepath.Join(dataDir, "profiles", "windows.yaml")
 	if err := writeSnapshotFile(profilePath, profileData); err != nil {
 		return "", err
@@ -527,34 +659,7 @@ func validTailnetState(dir string) bool {
 }
 
 func writeSnapshotFile(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	temp, err := os.CreateTemp(filepath.Dir(path), ".snapshot-*")
-	if err != nil {
-		return err
-	}
-	tempPath := temp.Name()
-	defer os.Remove(tempPath)
-	if err := temp.Chmod(0600); err != nil {
-		temp.Close()
-		return err
-	}
-	if _, err := temp.Write(data); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return os.Rename(tempPath, path)
+	return fileutil.WriteFile(path, data, 0600)
 }
 
 func removeCommandArg(args []string, command string) []string {
