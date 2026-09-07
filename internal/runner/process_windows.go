@@ -17,9 +17,8 @@ func hideWindow(cmd *exec.Cmd) {
 }
 
 func canStartTUN() bool {
-	cmd := exec.Command("net", "session")
-	hideWindow(cmd)
-	return cmd.Run() == nil
+	// net session also requires LanmanServer; its failure is not a privilege check.
+	return windows.GetCurrentProcessToken().IsElevated()
 }
 
 func tunUnavailableMessage() string {

@@ -163,18 +163,31 @@ func stopService(service *mgr.Service, timeout time.Duration) error {
 }
 
 func waitState(service *mgr.Service, wanted svc.State, timeout time.Duration) error {
+	return waitServiceState(service.Query, wanted, timeout, 200*time.Millisecond)
+}
+
+func waitServiceState(query func() (svc.Status, error), wanted svc.State, timeout, interval time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	var last svc.Status
 	for time.Now().Before(deadline) {
-		status, err := service.Query()
+		status, err := query()
 		if err != nil {
 			return err
 		}
+		last = status
 		if status.State == wanted {
 			return nil
 		}
-		time.Sleep(200 * time.Millisecond)
+		if wanted == svc.Running && status.State == svc.Stopped {
+			return serviceStateError(wanted, status)
+		}
+		time.Sleep(interval)
 	}
-	return fmt.Errorf("service did not reach state %s", stateName(wanted))
+	return serviceStateError(wanted, last)
+}
+
+func serviceStateError(wanted svc.State, status svc.Status) error {
+	return fmt.Errorf("service did not reach state %s: state=%s win32-exit=%d service-exit=%d checkpoint=%d wait-hint=%dms", stateName(wanted), stateName(status.State), status.Win32ExitCode, status.ServiceSpecificExitCode, status.CheckPoint, status.WaitHint)
 }
 
 func Status() (string, error) {

@@ -187,7 +187,7 @@ var runServiceCore = func(ctx context.Context, cfg *config.Config, profile strin
 
 var (
 	installWindowsService   = winservice.Install
-	controlWindowsService   = winservice.Control
+	controlWindowsService   = controlServiceWithDiagnostics
 	windowsServiceRunning   = winservice.Running
 	windowsServiceInstalled = winservice.Installed
 	stopUserCore            = runner.Stop
@@ -438,6 +438,10 @@ func captureServiceSnapshot(incoming ...*config.Config) ([]snapshotFileBackup, e
 }
 
 func restoreStoppedService(backup []snapshotFileBackup, cause error) error {
+	// A failed start may still be pending or restarting under SCM recovery.
+	if err := controlWindowsService("stop", 30*time.Second); err != nil {
+		return fmt.Errorf("%v; cannot stop failed service before snapshot restore: %w", cause, err)
+	}
 	if err := restoreServiceSnapshot(backup); err != nil {
 		return fmt.Errorf("%v; restore previous service snapshot: %w", cause, err)
 	}
@@ -445,6 +449,13 @@ func restoreStoppedService(backup []snapshotFileBackup, cause error) error {
 		return fmt.Errorf("%v; restart previous service snapshot: %w", cause, err)
 	}
 	return fmt.Errorf("%w; previous service snapshot was restored", cause)
+}
+
+func controlServiceWithDiagnostics(action string, timeout time.Duration) error {
+	if err := winservice.Control(action, timeout); err != nil {
+		return fmt.Errorf("%w; %s", err, runner.ServiceDiagnostics(winservice.DataDir()))
+	}
+	return nil
 }
 
 func restoreServiceSnapshot(backup []snapshotFileBackup) error {

@@ -749,7 +749,7 @@ func TestRestartRollsBackPartiallyWrittenAssetsOnPrepareFailure(t *testing.T) {
 	if err != nil || string(data) != "old-cache" {
 		t.Fatalf("partial cache survived: %q %v", data, err)
 	}
-	if strings.Join(actions, ",") != "stop,start" {
+	if strings.Join(actions, ",") != "stop,stop,start" {
 		t.Fatalf("actions=%v", actions)
 	}
 }

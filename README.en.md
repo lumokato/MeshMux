@@ -1,5 +1,7 @@
 # MeshMux
 
+> **Do not install v0.3.1.** Windows activation and rollback failures can leave the service unavailable and the system proxy pointing to a dead endpoint. Formal recommendation has been withdrawn; see the [incident and remaining acceptance gates](docs/INCIDENT-0.3.1.md).
+
 MeshMux manages mihomo-based proxy, WireGuard, Tailscale, and mobile profile publishing on Windows desktops and Linux desktop/headless environments.
 
 The Windows installer registers the core as an automatic system service that runs before sign-in. The service only reads a protected runtime snapshot under `ProgramData\MeshMux`; the editable user configuration has one canonical location under `%LocalAppData%\MeshMux`. If that file is still an installer bootstrap template during an upgrade, MeshMux attempts recovery from the legacy `%AppData%\MeshMux` location and then from the last successful service snapshot. It refuses to replace a working service configuration with an empty template. The service keeps an independent Tailnet identity and signs in with the configured auth key on its first start instead of migrating the old user-core login cache. The tray starts after user sign-in and manages the current user's proxy, configuration page, and core controls. UAC is only required for installation, removal, or explicit service control, not during a normal boot.

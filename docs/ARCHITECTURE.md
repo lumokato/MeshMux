@@ -1,5 +1,7 @@
 # MeshMux Architecture
 
+> The 0.3.1 installation incident supersedes prior release-readiness conclusions below. See INCIDENT-0.3.1.md for confirmed defects, local patch status and remaining installation/update gates.
+
 ## Ownership and data flow
 
 - cmd/meshmux owns CLI commands, process working-directory selection and Windows service lifecycle.

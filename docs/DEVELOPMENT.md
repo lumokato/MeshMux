@@ -1,5 +1,7 @@
 # Development and Version Authority
 
+> Release 0.3.1 is not recommended for installation. Its manager-only cold-boot evidence did not validate the full installer/core upgrade. See INCIDENT-0.3.1.md; exact-artifact installation and failure-recovery acceptance is mandatory before a draft becomes a formal release.
+
 ## Source and build inputs
 
 Use the current application checkout, not extracted installers or old build directories. cmd/, internal/, templates/ and assets/ are application source; .github/workflows/release.yml and installer/MeshMux.iss define packaging. packaging/linux/ owns Linux deployment examples.

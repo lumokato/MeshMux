@@ -17,8 +17,9 @@ import (
 )
 
 type windowsBackend struct {
-	cfgPath string
-	server  *webui.Server
+	cfgPath       string
+	server        *webui.Server
+	proxyFailures int
 }
 
 func newPlatformBackend() (trayBackend, error) {
@@ -39,7 +40,16 @@ func (b *windowsBackend) Capabilities() trayCapabilities {
 	return trayCapabilities{SystemProxy: true}
 }
 
-func (b *windowsBackend) InitialStart() error {
+func (b *windowsBackend) InitialStart() (result error) {
+	defer func() {
+		if result != nil {
+			if cfg, _, err := config.Load(b.cfgPath); err == nil && !runner.LocalProxyReady(cfg.Ports.Mixed) {
+				if err := runner.DisableOwnedProxy(cfg.Ports.Mixed); err != nil {
+					result = fmt.Errorf("%v; release system proxy: %w", result, err)
+				}
+			}
+		}
+	}()
 	if winservice.Installed() {
 		return b.withConfig(func(cfg *config.Config) error {
 			deadline := time.Now().Add(15 * time.Second)
@@ -83,7 +93,26 @@ func (b *windowsBackend) State() (trayState, error) {
 	} else {
 		state.CoreRunning = runner.IsRunning(cfg)
 	}
+	if err := b.reconcileProxy(cfg.Ports.Mixed); err != nil {
+		return state, err
+	}
+	state.SystemProxyOn = runner.ProxyEnabled()
 	return state, nil
+}
+
+var localProxyReady = runner.LocalProxyReady
+var disableOwnedProxy = runner.DisableOwnedProxy
+
+func (b *windowsBackend) reconcileProxy(port int) error {
+	if localProxyReady(port) {
+		b.proxyFailures = 0
+		return nil
+	}
+	b.proxyFailures++
+	if b.proxyFailures < 2 {
+		return nil
+	}
+	return disableOwnedProxy(port)
 }
 
 func (b *windowsBackend) OpenConfig() error {
@@ -107,10 +136,18 @@ func (b *windowsBackend) ToggleCore() error {
 		if winservice.Running() {
 			action = "stop"
 		}
+		if action == "stop" {
+			if err := b.withConfig(func(cfg *config.Config) error { return runner.DisableOwnedProxy(cfg.Ports.Mixed) }); err != nil {
+				return err
+			}
+		}
 		return runElevatedServiceAction(action, b.cfgPath)
 	}
 	return b.withConfig(func(cfg *config.Config) error {
 		if runner.IsRunning(cfg) {
+			if err := runner.DisableOwnedProxy(cfg.Ports.Mixed); err != nil {
+				return err
+			}
 			return runner.Stop(cfg)
 		}
 		return startWindowsCore(cfg)

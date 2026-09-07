@@ -416,6 +416,20 @@ func recentCoreLog() string {
 	return ":\n" + strings.Join(chunks, "\n")
 }
 
+// This is called by the elevated service controller, not the unprivileged Web API.
+func ServiceDiagnostics(home string) string {
+	var parts []string
+	for _, name := range []string{"service.log", "mihomo.err.log", "mihomo.out.log"} {
+		if text := recentLogText(filepath.Join(home, "logs", name)); text != "" {
+			parts = append(parts, name+": "+text)
+		}
+	}
+	if len(parts) == 0 {
+		return "no service diagnostics available; inspect Windows Service Control Manager events"
+	}
+	return "recent diagnostics (may include earlier attempts): " + strings.Join(parts, "\n")
+}
+
 func recentLogText(path string) string {
 	data, err := readFileTail(path, 2048)
 	if err != nil || len(data) == 0 {
