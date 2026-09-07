@@ -93,9 +93,6 @@ func runManaged(ctx context.Context, cfg *config.Config, profile string, supervi
 	if err := stopManaged(cfg); err != nil {
 		return err
 	}
-	if err := CleanupLogs(); err != nil {
-		return err
-	}
 	mihomo, err := prepareMihomo(cfg, true)
 	if err != nil {
 		return err
@@ -104,6 +101,9 @@ func runManaged(ctx context.Context, cfg *config.Config, profile string, supervi
 		return err
 	}
 	if err := ensureDashboard(cfg.Paths.Dashboard); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := os.MkdirAll("state", 0755); err != nil {
@@ -149,12 +149,20 @@ func runManaged(ctx context.Context, cfg *config.Config, profile string, supervi
 			return fmt.Errorf("report supervised start: %w", err)
 		}
 	}
+	networkCtx, cancelNetwork := context.WithCancel(ctx)
+	networkDone := make(chan struct{})
+	postNetwork := postStartNetworkRun
 	go func() {
-		if err := postStartNetworkRun(cfg); err != nil {
+		defer close(networkDone)
+		if err := postNetwork(networkCtx, cfg); err != nil && networkCtx.Err() == nil {
 			appendRunnerLog("网络后处理失败: %v", err)
 		}
 	}()
 	if supervise {
+		defer func() {
+			cancelNetwork()
+			<-networkDone
+		}()
 		select {
 		case err := <-done:
 			if _, ok := PID(cfg); !ok {
@@ -167,8 +175,16 @@ func runManaged(ctx context.Context, cfg *config.Config, profile string, supervi
 				return fmt.Errorf("mihomo exited: %w%s", err, recentCoreLog())
 			}
 		case <-ctx.Done():
+			cancelNetwork()
+			<-networkDone
 			return stopAfterCancellation(cfg, process.pid, done, ctx.Err())
 		}
+	} else {
+		go func() {
+			<-done
+			cancelNetwork()
+			<-networkDone
+		}()
 	}
 	return nil
 }
@@ -191,6 +207,7 @@ func stopAfterCancellation(cfg *config.Config, ownedPID int, done <-chan error, 
 	select {
 	case <-done:
 	case <-time.After(stopProcessTimeout):
+		return fmt.Errorf("owned mihomo PID %d did not exit within %s", ownedPID, stopProcessTimeout)
 	}
 	if _, ok := PID(cfg); !ok {
 		_ = clearPID()

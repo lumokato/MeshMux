@@ -219,10 +219,11 @@ func TestServiceReportsReadyBeforeNetworkPostStart(t *testing.T) {
 	}
 	postStarted := make(chan struct{})
 	postRelease := make(chan struct{})
-	postStartNetworkRun = func(*config.Config) error {
+	postStartNetworkRun = func(ctx context.Context, _ *config.Config) error {
 		close(postStarted)
-		<-postRelease
-		return nil
+		<-ctx.Done()
+		close(postRelease)
+		return ctx.Err()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan int, 1)
@@ -246,12 +247,16 @@ func TestServiceReportsReadyBeforeNetworkPostStart(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("network post-start did not begin")
 	}
-	close(postRelease)
 	cancel()
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("ServiceContext: %v", err)
+		}
+		select {
+		case <-postRelease:
+		default:
+			t.Fatal("network work outlived service shutdown")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("service did not stop after cancellation")
@@ -731,6 +736,19 @@ func TestMissingCustomCoreDoesNotFallBackToBundle(t *testing.T) {
 	}
 	if _, err := os.Stat(custom); !os.IsNotExist(err) {
 		t.Fatalf("custom core was written: %v", err)
+	}
+}
+
+func TestCancellationReportsUnfinishedProcessWait(t *testing.T) {
+	dir := useTempWorkingDir(t)
+	fake := newFakeProcessSystem()
+	restoreRunnerHooks(t, fake)
+	cfg := testRunnerConfig(t, dir)
+	stopProcessTimeout = time.Millisecond
+	done := make(chan error)
+	err := stopAfterCancellation(cfg, 991, done, context.Canceled)
+	if err == nil || !strings.Contains(err.Error(), "did not exit") {
+		t.Fatalf("unfinished process wait reported success: %v", err)
 	}
 }
 

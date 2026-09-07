@@ -172,6 +172,67 @@ func TestServiceResumeFailureKeepsServiceAliveAndRetries(t *testing.T) {
 	}
 }
 
+func TestServiceAcceptsStopBeforeCoreCreation(t *testing.T) {
+	home := t.TempDir()
+	restoreWorkingDir(t)
+	configPath := filepath.Join(home, config.DefaultConfigPath)
+	if err := os.WriteFile(configPath, []byte(`{"setup":{"allowDirectOnly":true}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "profiles"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "profiles", "windows.yaml"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	original := runServiceCore
+	t.Cleanup(func() { runServiceCore = original })
+	started := make(chan struct{})
+	runServiceCore = func(ctx context.Context, _ *config.Config, _ string, _ func(int) error) error {
+		close(started)
+		<-ctx.Done()
+		return nil
+	}
+	requests := make(chan svc.ChangeRequest, 1)
+	changes := make(chan svc.Status, 4)
+	done := make(chan uint32, 1)
+	go func() {
+		_, code := (&serviceHandler{configPath: configPath}).Execute(nil, requests, changes)
+		done <- code
+	}()
+	waitServiceStatus(t, changes, svc.StartPending)
+	waitServiceStatus(t, changes, svc.Running)
+	waitSignal(t, started, "core preparation")
+	requests <- svc.ChangeRequest{Cmd: svc.Stop}
+	waitServiceStatus(t, changes, svc.StopPending)
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("stop exit code = %d", code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stop blocked on core readiness")
+	}
+}
+
+func TestStopCoreFailureRemainsObservable(t *testing.T) {
+	want := errors.New("owned process could not be stopped")
+	done := make(chan struct{})
+	core := &serviceCore{cancel: func() {}, done: done, err: want}
+	close(done)
+	if err := stopServiceCore(core, time.Second); !errors.Is(err, want) {
+		t.Fatalf("stop error = %v", err)
+	}
+	select {
+	case <-core.done:
+		if !errors.Is(core.err, want) {
+			t.Fatalf("completion error = %v", core.err)
+		}
+	default:
+		t.Fatal("failed stop consumed completion and stranded the service")
+	}
+}
+
 func waitServiceStatus(t *testing.T, changes <-chan svc.Status, want svc.State) {
 	t.Helper()
 	select {

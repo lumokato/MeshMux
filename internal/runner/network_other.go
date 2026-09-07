@@ -2,8 +2,11 @@
 
 package runner
 
-import "github.com/meshmux/meshmux/internal/config"
+import (
+	"context"
+	"github.com/meshmux/meshmux/internal/config"
+)
 
-func postStartNetwork(cfg *config.Config) error {
+func postStartNetwork(_ context.Context, cfg *config.Config) error {
 	return nil
 }

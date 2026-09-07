@@ -54,4 +54,12 @@ Full Windows/Linux tests, vet, module verification and manager builds passed, in
 - Service, service-command and tray diagnostics now use the shared sanitized rotating writer, 2 MiB per file and two backups, with cross-process append locking.
 - The service-owned Windows core is kept under protected `ProgramData\\MeshMux\\bin\\mihomo.exe`. Installer registration initializes it only when absent; explicit core updates replace it while the service is stopped and report a restart failure without silently restoring or retrying an older core. Installer upgrades do not silently downgrade the service-owned core.
 
+## Startup lifecycle re-review
+
+The Windows service control loop starts core supervision asynchronously; reporting Running must not conceal a blocking wait for process creation. Stop and shutdown remain available during core preparation. A failed stop retains the old core handle and does not launch a replacement concurrently.
+
+Network post-processing belongs to a single core lifetime. Cancellation terminates and joins it before supervised shutdown completes. Routine startup no longer scans and rewrites historical log contents; bounded rotation and write-time redaction remain enabled. Process ownership checks and bounded termination waits remain necessary and are not proxy health gates.
+
+These source changes require fresh runtime acceptance. Earlier deployment results do not validate them. A diagnostic process running from a different runtime root is not evidence that port ownership checks should be removed.
+
 Do not interpret this review as proof that every defect has been eliminated.

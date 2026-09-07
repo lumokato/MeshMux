@@ -12,7 +12,7 @@ import (
 	"github.com/meshmux/meshmux/internal/config"
 )
 
-func postStartNetwork(cfg *config.Config) error {
+func postStartNetwork(parent context.Context, cfg *config.Config) error {
 	if cfg == nil || !cfg.TUN.Enabled {
 		return nil
 	}
@@ -32,7 +32,7 @@ func postStartNetwork(cfg *config.Config) error {
 		return nil
 	}
 	script := buildPostStartNetworkScript(routes, clearDNS, addRoutes)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
 	hideWindow(cmd)

@@ -68,7 +68,7 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 	changes <- svc.Status{State: svc.Running, Accepts: accepts}
 
 	var core *serviceCore
-	var coreDone <-chan error
+	var coreDone <-chan struct{}
 	startCore := func() error {
 		cfg, _, err := load(configArgs(h.configPath))
 		if err != nil {
@@ -81,10 +81,7 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 		if _, err := os.Stat(profile); err != nil {
 			return fmt.Errorf("find generated profile: %w", err)
 		}
-		replacement, err := startServiceCore(cfg, profile)
-		if err != nil {
-			return fmt.Errorf("start core: %w", err)
-		}
+		replacement := startServiceCore(cfg, profile)
 		core = replacement
 		coreDone = replacement.done
 		return nil
@@ -94,6 +91,9 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 			return nil
 		}
 		err := stopServiceCore(core, 8*time.Second)
+		if err != nil {
+			return err
+		}
 		core = nil
 		coreDone = nil
 		return err
@@ -170,14 +170,17 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 			appendServiceLog(h.configPath, "power resume: restarting core")
 			if err := stopCore(); err != nil {
 				appendServiceLog(h.configPath, "restart core after resume: "+err.Error())
+				continue
 			}
 			if err := startCore(); err != nil {
 				appendServiceLog(h.configPath, "restart core after resume: "+err.Error())
 				scheduleRetry()
 				continue
 			}
-			appendServiceLog(h.configPath, "power resume: core restarted")
-		case err := <-coreDone:
+			appendServiceLog(h.configPath, "power resume: core start scheduled")
+		case <-coreDone:
+			err := core.err
+			core.cancel()
 			core = nil
 			coreDone = nil
 			if err != nil {
@@ -198,37 +201,25 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 
 type serviceCore struct {
 	cancel context.CancelFunc
-	done   chan error
+	done   chan struct{}
+	err    error
 }
 
-func startServiceCore(cfg *config.Config, profile string) (*serviceCore, error) {
+func startServiceCore(cfg *config.Config, profile string) *serviceCore {
 	ctx, cancel := context.WithCancel(context.Background())
-	ready := make(chan struct{}, 1)
-	done := make(chan error, 1)
+	core := &serviceCore{cancel: cancel, done: make(chan struct{})}
 	go func() {
-		done <- runServiceCore(ctx, cfg, profile, func(int) error {
-			ready <- struct{}{}
-			return nil
-		})
+		defer close(core.done)
+		core.err = runServiceCore(ctx, cfg, profile, func(int) error { return nil })
 	}()
-	core := &serviceCore{cancel: cancel, done: done}
-	select {
-	case err := <-done:
-		cancel()
-		if err == nil {
-			err = errors.New("core exited before process creation")
-		}
-		return nil, err
-	case <-ready:
-		return core, nil
-	}
+	return core
 }
 
 func stopServiceCore(core *serviceCore, timeout time.Duration) error {
 	core.cancel()
 	select {
-	case err := <-core.done:
-		return err
+	case <-core.done:
+		return core.err
 	case <-time.After(timeout):
 		return fmt.Errorf("timed out after %s", timeout)
 	}
