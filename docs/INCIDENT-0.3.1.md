@@ -2,7 +2,7 @@
 
 ## Release status
 
-Do not install 0.3.1. The GitHub release has been marked prerelease with an installation warning after a reported Windows service activation and rollback failure. The user's affected machine was restored to 0.2.0. Do not request another upgrade or Tailnet login reset to reproduce this incident.
+Do not install 0.3.1. The GitHub release has been withdrawn and has no application assets after a reported Windows service activation and rollback failure. The affected machine was returned to its pre-installation working state by the user. Do not request another upgrade or Tailnet login reset to reproduce this incident.
 
 ## Evidence and limits
 
@@ -25,7 +25,7 @@ The prior cold-boot acceptance replaced only manager binaries and kept the exist
 1. Transactional installer upgrade: stage and validate the complete candidate, retain the previous executable/core/service definition and protected snapshot, stop writers, activate, and restore the complete known-good pair on failure. Do not publish a config-only rollback as full rollback. A failed installation must leave a usable configuration/recovery surface.
 2. User-context network recovery: cover installer abort, absent tray, core crash, failed restart and uninstall. Preserve other proxies/PAC, do not alter another user's HKCU under over-the-shoulder elevation, and test TUN route/DNS cleanup separately. No forced relogin or identity replacement.
 3. One effective update path: follow supported current stable upstream by default, port required inbound functionality, validate generated configuration, promote only a verified core into the protected service-owned location, restart and revert binary/state selection on failed health checks. Preserve explicit user version pins.
-4. Disposable Windows acceptance: fresh install, upgrades from 0.2.0 and 0.3.x, failed executable/configuration, occupied ports, disabled LanmanServer, rejected elevation, installer cancellation, failed rollback and reboot. Test exact release artifacts, not only source or manager-only copies. Do not use a user's working networking stack as the test fixture.
+4. Disposable Windows acceptance: fresh install, upgrades from each supported current installation layout, failed executable/configuration, occupied ports, disabled LanmanServer, rejected elevation, installer cancellation, failed rollback and reboot. Test exact release artifacts, not only source or manager-only copies. Do not use a user's working networking stack as the test fixture.
 
 ## Current patch boundary
 
