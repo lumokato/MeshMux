@@ -46,6 +46,10 @@ func runWindowsService(args []string) error {
 	return svc.Run(winservice.Name, &serviceHandler{configPath: configPath})
 }
 
+func serviceCorePath() string {
+	return filepath.Join(winservice.DataDir(), config.DefaultMihomoPath())
+}
+
 type serviceHandler struct {
 	configPath string
 }
@@ -65,8 +69,9 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 	if err != nil {
 		return serviceFailure(h.configPath, "load config", err)
 	}
-	// A system service must never execute a user-replaceable custom core.
-	cfg.Components.Mihomo.Path = config.BundledMihomoPath()
+	// A system service owns one protected core copy. It is updated explicitly by
+	// the component updater and is independent from the install directory.
+	cfg.Components.Mihomo.Path = serviceCorePath()
 	profile := filepath.Join(filepath.Dir(h.configPath), "profiles", "windows.yaml")
 	if _, err := os.Stat(profile); err != nil {
 		return serviceFailure(h.configPath, "find generated profile", err)
@@ -192,7 +197,6 @@ var (
 	windowsServiceInstalled = winservice.Installed
 	stopUserCore            = runner.Stop
 	startUserCore           = startDetached
-	verifyWindowsService    = waitForWindowsService
 	prepareWindowsSnapshot  = prepareServiceSnapshot
 )
 
@@ -216,6 +220,33 @@ func manageWindowsService(args []string) error {
 	}
 
 	switch action {
+	case "register":
+		path, err := filepath.Abs(strings.TrimSpace(*configPath))
+		if err != nil || strings.TrimSpace(*configPath) == "" {
+			return errors.New("service register requires an absolute config path")
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		path, err = config.EnsureCanonicalConfig(
+			path,
+			filepath.Join(filepath.Dir(executable), "meshmux.example.json"),
+			filepath.Join(winservice.DataDir(), config.DefaultConfigPath),
+		)
+		if err != nil {
+			return err
+		}
+		if err := winservice.SecureDataDir(winservice.DataDir()); err != nil {
+			return err
+		}
+		// Registration prepares only local files. It never contacts providers, Tailnet,
+		// controllers, or other upstream services.
+		snapshotPath, err := prepareServiceSnapshotFiles(path)
+		if err != nil {
+			return err
+		}
+		return installWindowsService(executable, snapshotPath)
 	case "install", "activate", "activate-if-ready":
 		path, err := filepath.Abs(strings.TrimSpace(*configPath))
 		if err != nil || strings.TrimSpace(*configPath) == "" {
@@ -256,12 +287,21 @@ func manageWindowsService(args []string) error {
 		return activateWindowsService(path)
 	case "remove":
 		return winservice.Remove()
+	case "update-core":
+		path, err := filepath.Abs(strings.TrimSpace(*configPath))
+		if err != nil || strings.TrimSpace(*configPath) == "" {
+			return errors.New("service update-core requires an absolute config path")
+		}
+		return updateInstalledServiceCore(path)
 	case "start", "stop", "restart":
 		if action == "stop" {
 			return controlWindowsService("stop", 30*time.Second)
 		}
 		if strings.TrimSpace(*configPath) == "" {
 			return fmt.Errorf("service %s requires an absolute config path", action)
+		}
+		if _, err := os.Stat(filepath.Join(winservice.DataDir(), config.DefaultConfigPath)); os.IsNotExist(err) {
+			return activateWindowsService(*configPath)
 		}
 		return restartWindowsService(action, *configPath)
 	case "status":
@@ -272,7 +312,7 @@ func manageWindowsService(args []string) error {
 		fmt.Println(status)
 		return nil
 	default:
-		return fmt.Errorf("service expects install, activate, activate-if-ready, remove, start, stop, restart, or status")
+		return fmt.Errorf("service expects register, install, activate, activate-if-ready, update-core, remove, start, stop, restart, or status")
 	}
 }
 
@@ -315,9 +355,6 @@ func activateWindowsService(sourcePath string) error {
 	}
 	startErr := controlWindowsService("start", 30*time.Second)
 	if startErr == nil {
-		startErr = verifyWindowsService(cfg, 5*time.Second)
-	}
-	if startErr == nil {
 		return nil
 	}
 	_ = controlWindowsService("stop", 15*time.Second)
@@ -358,10 +395,6 @@ func restartWindowsService(action, sourcePath string) error {
 	if err := controlWindowsService("start", 30*time.Second); err != nil {
 		return restoreStoppedService(backup, fmt.Errorf("start service: %w", err))
 	}
-	if err := verifyWindowsService(cfg, 5*time.Second); err != nil {
-		_ = controlWindowsService("stop", 15*time.Second)
-		return restoreStoppedService(backup, fmt.Errorf("verify service: %w", err))
-	}
 	return nil
 }
 
@@ -376,6 +409,7 @@ func captureServiceSnapshot(incoming ...*config.Config) ([]snapshotFileBackup, e
 	paths := []string{
 		filepath.Join(home, config.DefaultConfigPath),
 		filepath.Join(home, "profiles", "windows.yaml"),
+		filepath.Join(home, config.DefaultMihomoPath()),
 	}
 	for _, directory := range []string{"providers", "wireguard"} {
 		root := filepath.Join(home, directory)
@@ -473,25 +507,6 @@ func restoreServiceSnapshot(backup []snapshotFileBackup) error {
 	return nil
 }
 
-func waitForWindowsService(cfg *config.Config, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	var readySince time.Time
-	for time.Now().Before(deadline) {
-		if winservice.Running() && runner.ControllerReady(cfg) {
-			if readySince.IsZero() {
-				readySince = time.Now()
-			}
-			if time.Since(readySince) >= time.Second {
-				return nil
-			}
-		} else {
-			readySince = time.Time{}
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	return errors.New("service did not remain running with a ready controller")
-}
-
 func serviceFailure(configPath, stage string, err error) (bool, uint32) {
 	message := fmt.Sprintf("%s: %v", strings.TrimSpace(stage), err)
 	appendServiceLog(configPath, message)
@@ -571,9 +586,12 @@ func prepareServiceSnapshotFiles(sourcePath string) (result string, resultErr er
 	if err := snapshotReferencedAssets(cfg, dataDir); err != nil {
 		return "", err
 	}
+	if err := installServiceCore(dataDir); err != nil {
+		return "", err
+	}
 
 	stored := cfg.StorageCopy()
-	stored.Components.Mihomo.Path = config.BundledMihomoPath()
+	stored.Components.Mihomo.Path = config.DefaultMihomoPath()
 	stored.Paths.Dashboard = "dashboard"
 	configData, err := json.MarshalIndent(stored, "", "  ")
 	if err != nil {
@@ -589,6 +607,117 @@ func prepareServiceSnapshotFiles(sourcePath string) (result string, resultErr er
 	return snapshotPath, nil
 }
 
+func installServiceCore(dataDir string) error {
+	target := filepath.Join(dataDir, config.DefaultMihomoPath())
+	if info, err := os.Stat(target); err == nil && !info.IsDir() && info.Size() >= 1024*1024 {
+		// The service-owned core is an explicit runtime state. An installer upgrade
+		// must not silently downgrade it; use the core update action instead.
+		return nil
+	}
+	source := config.BundledMihomoPath()
+	if _, err := os.Stat(source); err != nil {
+		return fmt.Errorf("bundled mihomo is unavailable: %w", err)
+	}
+	return copyFileForService(source, target)
+}
+
+func copyFileForService(source, target string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+		return err
+	}
+	return fileutil.Write(target, 0700, func(out io.Writer) error {
+		_, err := io.Copy(out, in)
+		return err
+	})
+}
+
+func updateInstalledServiceCore(sourcePath string) error {
+	if !winservice.Installed() {
+		return nil
+	}
+	if err := winservice.SecureDataDir(winservice.DataDir()); err != nil {
+		return err
+	}
+	if _, err := os.Stat(sourcePath); err != nil {
+		return err
+	}
+	target := serviceCorePath()
+	previousCore, previousErr := os.ReadFile(target)
+	previousExists := previousErr == nil
+	if previousErr != nil && !os.IsNotExist(previousErr) {
+		return fmt.Errorf("read existing service core: %w", previousErr)
+	}
+	running := winservice.Running()
+	if running {
+		if err := controlWindowsService("stop", 30*time.Second); err != nil {
+			return fmt.Errorf("stop service for core update: %w", err)
+		}
+	}
+	if err := installServiceCoreFromConfig(sourcePath); err != nil {
+		if running {
+			_ = controlWindowsService("start", 30*time.Second)
+		}
+		return err
+	}
+	if running {
+		if err := controlWindowsService("start", 30*time.Second); err != nil {
+			restoreErr := restoreServiceCore(target, previousCore, previousExists)
+			if restoreErr == nil {
+				restoreErr = controlWindowsService("start", 30*time.Second)
+			}
+			if restoreErr != nil {
+				return fmt.Errorf("restart service after core update: %v; restore previous core: %w", err, restoreErr)
+			}
+			return fmt.Errorf("restart service after core update: %w; previous core was restored", err)
+		}
+	}
+	return nil
+}
+
+func restoreServiceCore(path string, data []byte, exists bool) error {
+	if exists {
+		return fileutil.WriteFile(path, data, 0700)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func updateServiceCoreIfInstalled(sourcePath string) error {
+	if !winservice.Installed() {
+		return nil
+	}
+	return winservice.RunElevated("update-core", sourcePath)
+}
+
+func installServiceCoreFromConfig(sourcePath string) error {
+	cfg, _, err := config.Load(sourcePath)
+	if err != nil {
+		return err
+	}
+	source := strings.TrimSpace(cfg.Components.Mihomo.Path)
+	if source == "" {
+		source = config.DefaultMihomoPath()
+	}
+	if !filepath.IsAbs(source) {
+		abs, err := filepath.Abs(filepath.Join(filepath.Dir(sourcePath), source))
+		if err != nil {
+			return err
+		}
+		source = abs
+	}
+	if _, err := os.Stat(source); err != nil {
+		return fmt.Errorf("downloaded mihomo is unavailable: %w", err)
+	}
+	return copyFileForService(source, serviceCorePath())
+}
+
 func snapshotReferencedAssets(cfg *config.Config, destinationRoot string) error {
 	paths := make([]string, 0, len(cfg.Providers)+len(cfg.WireGuard.Configs))
 	for _, provider := range cfg.Providers {
@@ -597,6 +726,9 @@ func snapshotReferencedAssets(cfg *config.Config, destinationRoot string) error 
 			path = filepath.Join("providers", provider.Name+".yaml")
 		}
 		if path != "" {
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				continue
+			}
 			paths = append(paths, path)
 		}
 	}

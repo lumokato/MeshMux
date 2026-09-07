@@ -4,7 +4,7 @@ This archive is the portable Linux amd64 application bundle. It contains:
 
 - `meshmux`: CLI and headless runner.
 - `meshmux-tray`: desktop tray application.
-- `bin/mihomo`: pinned `v1.19.29-meshmux.1` core.
+- `bin/mihomo`: the core selected and checksum-verified by the release workflow.
 - `bin/geoip.metadb` and `dashboard/`: bundled runtime assets.
 - `meshmux.local.json`: bootstrap configuration.
 - `meshmux.service`, `meshmux-web.service`, `meshmux-tray.desktop`, and `meshmux-sudoers`: deployment examples for the existing `codex` account layout. Review and adjust their user and paths before installing them on another machine.

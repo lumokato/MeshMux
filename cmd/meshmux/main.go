@@ -50,6 +50,12 @@ func run(args []string) error {
 		return nil
 	case "config-check":
 		return checkConfig(args[1:], os.Stdout)
+	case "refresh-providers":
+		cfg, _, err := load(args[1:])
+		if err != nil {
+			return err
+		}
+		return generator.RefreshProviders(cfg)
 	case "init":
 		fs := flag.NewFlagSet("init", flag.ContinueOnError)
 		overwrite := fs.Bool("force", false, "overwrite meshmux.local.json")
@@ -106,7 +112,7 @@ func run(args []string) error {
 		fmt.Println("sha256:", result.SHA256)
 		return nil
 	case "download":
-		cfg, _, err := load(args[1:])
+		cfg, configPath, err := load(args[1:])
 		if err != nil {
 			return err
 		}
@@ -118,6 +124,9 @@ func run(args []string) error {
 				return err
 			}
 			if err := runner.MarkMihomoDownloaded(cfg); err != nil {
+				return err
+			}
+			if err := updateServiceCoreIfInstalled(configPath); err != nil {
 				return err
 			}
 			fmt.Println("installed mihomo:", path)
@@ -133,6 +142,9 @@ func run(args []string) error {
 				return err
 			}
 			if err := runner.MarkMihomoDownloaded(cfg); err != nil {
+				return err
+			}
+			if err := updateServiceCoreIfInstalled(configPath); err != nil {
 				return err
 			}
 			fmt.Println("installed mihomo:", path)

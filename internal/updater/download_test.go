@@ -264,9 +264,8 @@ func TestComponentChecksumRequiredAndVerified(t *testing.T) {
 	if err != nil || got != expected {
 		t.Fatalf("explicit pin lost: %s %v", got, err)
 	}
-	got, err = assetChecksum(config.Component{Repo: config.DefaultMihomoRepo, ReleaseTag: config.DefaultMihomoReleaseTag}, asset{Name: "mihomo-windows-amd64-compatible-v1.19.29-meshmux.2.zip"})
-	if err != nil || got != pinnedWindowsCoreSHA256 {
-		t.Fatal("fixed core pin lost")
+	if _, err = assetChecksum(config.Component{Repo: config.DefaultMihomoRepo, ReleaseTag: config.DefaultMihomoReleaseTag}, asset{Name: "mihomo-windows-amd64-compatible-v1.19.29-meshmux.2.zip"}); err == nil {
+		t.Fatal("unhashed core asset accepted")
 	}
 	path := filepath.Join(t.TempDir(), "asset")
 	if err := os.WriteFile(path, []byte("abc"), 0600); err != nil {

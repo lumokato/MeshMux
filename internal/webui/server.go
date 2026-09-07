@@ -722,6 +722,12 @@ func (s *Server) actionAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 	}
 	var message string
 	switch req.Action {
+	case "refresh-providers":
+		if err := generator.RefreshProviders(cfg); err != nil {
+			http.Error(w, runner.RedactLogText(err.Error()), http.StatusBadGateway)
+			return
+		}
+		message = "订阅已更新；现有核心未被停止"
 	case "generate":
 		if req.Target == "" || req.Target == "all" {
 			written, err := generator.GenerateAll(cfg)
@@ -807,6 +813,12 @@ func (s *Server) actionAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if goos == "windows" && winservice.Installed() {
+			if err := winservice.RunElevated("update-core", s.ConfigPath); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		message = "mihomo 已安装: " + path
 	case "download-dashboard":
 		path, err := updater.Download(cfg.Components.Dashboard, "dashboard")
@@ -867,9 +879,6 @@ func saveConfig(path string, cfg *config.Config) error {
 	}
 	cfg.ApplyDefaults()
 	if err := cfg.Validate(); err != nil {
-		return err
-	}
-	if err := generator.RefreshProviders(cfg); err != nil {
 		return err
 	}
 	stored := cfg.StorageCopy()

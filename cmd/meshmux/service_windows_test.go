@@ -220,13 +220,11 @@ func TestActivateWindowsServiceRestoresUserCoreWhenServiceStartFails(t *testing.
 	originalControl := controlWindowsService
 	originalStop := stopUserCore
 	originalStart := startUserCore
-	originalVerify := verifyWindowsService
 	originalPrepare := prepareWindowsSnapshot
 	t.Cleanup(func() {
 		controlWindowsService = originalControl
 		stopUserCore = originalStop
 		startUserCore = originalStart
-		verifyWindowsService = originalVerify
 		prepareWindowsSnapshot = originalPrepare
 	})
 	var actions []string
@@ -248,10 +246,6 @@ func TestActivateWindowsServiceRestoresUserCoreWhenServiceStartFails(t *testing.
 		}
 		return nil
 	}
-	verifyWindowsService = func(*config.Config, time.Duration) error {
-		t.Fatal("service verification ran after start failed")
-		return nil
-	}
 	prepareWindowsSnapshot = func(string) (string, error) {
 		actions = append(actions, "prepare")
 		return configPath, nil
@@ -262,59 +256,6 @@ func TestActivateWindowsServiceRestoresUserCoreWhenServiceStartFails(t *testing.
 		t.Fatalf("activate error = %v", err)
 	}
 	want := []string{"stop", "stop-user", "prepare", "start", "stop", "restore-user"}
-	if strings.Join(actions, ",") != strings.Join(want, ",") {
-		t.Fatalf("actions = %v, want %v", actions, want)
-	}
-}
-
-func TestActivateWindowsServiceRestoresUserCoreWhenReadinessFails(t *testing.T) {
-	home := t.TempDir()
-	restoreWorkingDir(t)
-	t.Setenv("MESHMUX_HOME", home)
-	configPath := filepath.Join(home, "meshmux.local.json")
-	if err := os.WriteFile(configPath, []byte(`{"name":"test","setup":{"allowDirectOnly":true}}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	originalControl := controlWindowsService
-	originalStop := stopUserCore
-	originalStart := startUserCore
-	originalVerify := verifyWindowsService
-	originalPrepare := prepareWindowsSnapshot
-	t.Cleanup(func() {
-		controlWindowsService = originalControl
-		stopUserCore = originalStop
-		startUserCore = originalStart
-		verifyWindowsService = originalVerify
-		prepareWindowsSnapshot = originalPrepare
-	})
-	var actions []string
-	controlWindowsService = func(action string, _ time.Duration) error {
-		actions = append(actions, action)
-		return nil
-	}
-	stopUserCore = func(*config.Config) error {
-		actions = append(actions, "stop-user")
-		return nil
-	}
-	verifyWindowsService = func(*config.Config, time.Duration) error {
-		actions = append(actions, "verify")
-		return errors.New("not ready")
-	}
-	startUserCore = func(*config.Config, string, string) error {
-		actions = append(actions, "restore-user")
-		return nil
-	}
-	prepareWindowsSnapshot = func(string) (string, error) {
-		actions = append(actions, "prepare")
-		return configPath, nil
-	}
-
-	err := activateWindowsService(configPath)
-	if err == nil || !strings.Contains(err.Error(), "previous user core was restored") {
-		t.Fatalf("activate error = %v", err)
-	}
-	want := []string{"stop", "stop-user", "prepare", "start", "verify", "stop", "restore-user"}
 	if strings.Join(actions, ",") != strings.Join(want, ",") {
 		t.Fatalf("actions = %v, want %v", actions, want)
 	}
@@ -333,13 +274,11 @@ func TestRestartWindowsServiceStopsServiceBeforeUserCore(t *testing.T) {
 	originalControl := controlWindowsService
 	originalRunning := windowsServiceRunning
 	originalStop := stopUserCore
-	originalVerify := verifyWindowsService
 	originalPrepare := prepareWindowsSnapshot
 	t.Cleanup(func() {
 		controlWindowsService = originalControl
 		windowsServiceRunning = originalRunning
 		stopUserCore = originalStop
-		verifyWindowsService = originalVerify
 		prepareWindowsSnapshot = originalPrepare
 	})
 	var actions []string
@@ -356,15 +295,11 @@ func TestRestartWindowsServiceStopsServiceBeforeUserCore(t *testing.T) {
 		actions = append(actions, "prepare")
 		return configPath, nil
 	}
-	verifyWindowsService = func(*config.Config, time.Duration) error {
-		actions = append(actions, "verify")
-		return nil
-	}
 
 	if err := restartWindowsService("restart", configPath); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"stop", "stop-user", "prepare", "start", "verify"}
+	want := []string{"stop", "stop-user", "prepare", "start"}
 	if strings.Join(actions, ",") != strings.Join(want, ",") {
 		t.Fatalf("actions = %v, want %v", actions, want)
 	}

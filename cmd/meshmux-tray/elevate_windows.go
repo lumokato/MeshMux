@@ -3,14 +3,9 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
-	"syscall"
 
 	"golang.org/x/sys/windows"
-
-	"github.com/meshmux/meshmux/internal/winservice"
 )
 
 func setDPIAwareness() {
@@ -32,36 +27,8 @@ func setDPIAwareness() {
 }
 
 func relaunchElevatedIfNeeded() (bool, error) {
-	if winservice.Installed() {
-		return false, nil
-	}
-	if windows.GetCurrentProcessToken().IsElevated() {
-		return false, nil
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return false, err
-	}
-	verb, err := syscall.UTF16PtrFromString("runas")
-	if err != nil {
-		return false, err
-	}
-	file, err := syscall.UTF16PtrFromString(exe)
-	if err != nil {
-		return false, err
-	}
-	args, err := syscall.UTF16PtrFromString(shellArgs(os.Args[1:]))
-	if err != nil {
-		return false, err
-	}
-	cwd, err := syscall.UTF16PtrFromString(filepath.Dir(exe))
-	if err != nil {
-		return false, err
-	}
-	if err := windows.ShellExecute(0, verb, file, args, cwd, windows.SW_NORMAL); err != nil {
-		return false, err
-	}
-	return true, nil
+	// Only explicit service actions elevate; opening the management UI never does.
+	return false, nil
 }
 
 func shellArgs(args []string) string {

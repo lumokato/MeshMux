@@ -58,6 +58,7 @@ Name: "{autoprograms}\MeshMux"; Filename: "{app}\MeshMux.exe"
 Name: "{userstartup}\MeshMux"; Filename: "{app}\MeshMux.exe"
 
 [Run]
+Filename: "{app}\meshmux-cli.exe"; Parameters: "service register -config ""{localappdata}\MeshMux\meshmux.local.json"""; Flags: runhidden waituntilterminated
 Filename: "{app}\MeshMux.exe"; Description: "Launch MeshMux"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [Registry]

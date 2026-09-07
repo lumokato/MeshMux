@@ -119,10 +119,7 @@ func (b *windowsBackend) RestartCore() error {
 		if err != nil {
 			return err
 		}
-		if err := runner.Restart(cfg, profile); err != nil {
-			return err
-		}
-		return runner.Proxy("on", cfg.Ports.Mixed)
+		return runner.Restart(cfg, profile)
 	})
 }
 
@@ -177,10 +174,7 @@ func startWindowsCore(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	if err := runner.Start(cfg, profile); err != nil {
-		return err
-	}
-	return runner.Proxy("on", cfg.Ports.Mixed)
+	return runner.Start(cfg, profile)
 }
 
 func ensureWorkingDir() (string, error) {

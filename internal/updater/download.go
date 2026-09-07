@@ -23,8 +23,11 @@ import (
 )
 
 type release struct {
-	Assets []asset `json:"assets"`
+	TagName string  `json:"tag_name"`
+	Assets  []asset `json:"assets"`
 }
+
+type releasePage []release
 
 type asset struct {
 	Name   string `json:"name"`
@@ -93,9 +96,9 @@ func Download(component config.Component, kind string) (string, error) {
 }
 
 func releaseAsset(repo, tag, pattern string) (asset, error) {
-	endpoint := "https://api.github.com/repos/" + repo + "/releases/latest"
-	if tag != "" {
-		endpoint = "https://api.github.com/repos/" + repo + "/releases/tags/" + url.PathEscape(tag)
+	endpoint := "https://api.github.com/repos/" + repo + "/releases/tags/" + url.PathEscape(tag)
+	if tag == "" {
+		endpoint = "https://api.github.com/repos/" + repo + "/releases?per_page=30"
 	}
 	resp, err := httpClient().Get(endpoint)
 	if err != nil {
@@ -106,19 +109,30 @@ func releaseAsset(repo, tag, pattern string) (asset, error) {
 		return asset{}, fmt.Errorf("GitHub release query failed: %s", resp.Status)
 	}
 	var rel release
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&rel); err != nil {
+	var rels releasePage
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, 8<<20))
+	if tag == "" {
+		if err := decoder.Decode(&rels); err != nil {
+			return asset{}, err
+		}
+	} else if err := decoder.Decode(&rel); err != nil {
 		return asset{}, err
 	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return asset{}, err
 	}
-	for _, asset := range rel.Assets {
-		if re.MatchString(asset.Name) {
-			return asset, nil
+	if tag != "" {
+		rels = releasePage{rel}
+	}
+	for _, item := range rels {
+		for _, asset := range item.Assets {
+			if re.MatchString(asset.Name) {
+				return asset, nil
+			}
 		}
 	}
-	return asset{}, fmt.Errorf("no asset matching %q in %s", pattern, repo)
+	return asset{}, fmt.Errorf("no asset matching %q in %s releases", pattern, repo)
 }
 
 func downloadFile(rawURL, path string) error {
@@ -465,17 +479,13 @@ func httpClient() *http.Client {
 }
 
 const (
-	maxDownloadBytes        int64 = 512 << 20
-	maxExpandedBytes        int64 = 1 << 30
-	maxArchiveEntries             = 20000
-	pinnedWindowsCoreSHA256       = "0338285cfb7ec7c525d955387b14681b72d7b289730654ecd51a1f94bdad5019"
+	maxDownloadBytes  int64 = 512 << 20
+	maxExpandedBytes  int64 = 1 << 30
+	maxArchiveEntries       = 20000
 )
 
 func assetChecksum(component config.Component, selected asset) (string, error) {
 	expected := strings.ToLower(strings.TrimSpace(component.SHA256))
-	if expected == "" && component.Repo == config.DefaultMihomoRepo && component.ReleaseTag == config.DefaultMihomoReleaseTag && selected.Name == "mihomo-windows-amd64-compatible-v1.19.29-meshmux.2.zip" {
-		expected = pinnedWindowsCoreSHA256
-	}
 	if expected == "" {
 		expected = strings.TrimPrefix(selected.Digest, "sha256:")
 	}

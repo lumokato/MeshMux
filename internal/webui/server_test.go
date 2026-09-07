@@ -480,7 +480,7 @@ func TestConfigAPIAcceptsStructuredConfig(t *testing.T) {
 	}
 }
 
-func TestConfigAPIRejectsSilentDirectOnlyFallback(t *testing.T) {
+func TestConfigAPIAcceptsOfflineConfigurationWithoutRefreshingProviders(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "meshmux.local.json")
 	requestBody, err := json.Marshal(map[string]any{"config": config.Config{Name: "empty"}})
 	if err != nil {
@@ -489,11 +489,11 @@ func TestConfigAPIRejectsSilentDirectOnlyFallback(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(requestBody))
 	response := httptest.NewRecorder()
 	(&Server{ConfigPath: path}).configAPIFor("windows", response, req)
-	if response.Code == http.StatusOK || !strings.Contains(response.Body.String(), "missing daily proxy provider") {
+	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("invalid config was written: %v", err)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("offline config was not written: %v", err)
 	}
 }
 

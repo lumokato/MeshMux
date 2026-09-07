@@ -21,9 +21,9 @@ const (
 	DefaultConfigPath               = "meshmux.local.json"
 	ExampleConfigPath               = "templates/meshmux.example.json"
 	DefaultMihomoRepo               = "lumokato/MeshMux"
-	DefaultMihomoReleaseTag         = "mihomo-v1.19.29-meshmux.2"
-	DefaultMihomoAssetPattern       = `mihomo-windows-amd64-compatible-v1\.19\.29-meshmux\.2\.zip$`
-	LinuxMihomoAssetPattern         = `mihomo-linux-amd64-compatible-v1\.19\.29-meshmux\.2\.gz$`
+	DefaultMihomoReleaseTag         = ""
+	DefaultMihomoAssetPattern       = `mihomo-windows-amd64-compatible.*\.zip$`
+	LinuxMihomoAssetPattern         = `mihomo-linux-amd64-compatible.*\.gz$`
 	OfficialMihomoRepo              = "MetaCubeX/mihomo"
 	OfficialLinuxMihomoAssetPattern = `mihomo-linux-amd64-compatible.*\.gz$`
 )
@@ -442,9 +442,6 @@ func (c *Config) applyDefaults(goos string) {
 		c.Components.Mihomo.AssetPattern = DefaultMihomoAssetPatternFor(goos)
 	} else if c.Components.Mihomo.AssetPattern == "" {
 		c.Components.Mihomo.AssetPattern = mihomoAssetPatternFor(goos, c.Components.Mihomo.Repo)
-	}
-	if c.Components.Mihomo.Repo == DefaultMihomoRepo && c.Components.Mihomo.ReleaseTag == "" {
-		c.Components.Mihomo.ReleaseTag = DefaultMihomoReleaseTag
 	}
 	if c.Components.Mihomo.Path == "" || (defaultMihomoComponent(c.Components.Mihomo) && isKnownDefaultMihomoPath(c.Components.Mihomo.Path)) {
 		c.Components.Mihomo.Path = DefaultMihomoPathFor(goos)

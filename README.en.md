@@ -1,6 +1,6 @@
 # MeshMux
 
-> **Do not install v0.3.1.** Windows activation and rollback failures can leave the service unavailable and the system proxy pointing to a dead endpoint. Formal recommendation has been withdrawn; see the [incident and remaining acceptance gates](docs/INCIDENT-0.3.1.md).
+> **Do not install v0.3.1.** That release was withdrawn. The replacement line is v0.3.2; its exact installer and Linux archive must be generated and accepted before promotion.
 
 MeshMux manages mihomo-based proxy, WireGuard, Tailscale, and mobile profile publishing on Windows desktops and Linux desktop/headless environments.
 
@@ -31,7 +31,7 @@ The Windows installer registers the core as an automatic system service that run
 
 MeshMux bundles a patched Mihomo core that listens only on the embedded tsnet node's Tailnet addresses and forwards configured TCP or UDP ports to local targets. Tailscale ACLs and Grants remain the access-control layer. The mappings are emitted only in the Windows profile; mobile profiles do not inherit them. With no mappings configured, existing outbound-only behavior is unchanged.
 
-See the Chinese README for the full JSON example. The patched core is based on upstream `v1.19.29`; its binary and corresponding source are published as a [fixed MeshMux core asset](https://github.com/lumokato/MeshMux/releases/tag/mihomo-v1.19.29-meshmux.2). Windows/Linux CI download and verify their fixed binary assets; the corresponding source is available in the same core release. See [Development](docs/DEVELOPMENT.md) and [Architecture](docs/ARCHITECTURE.md) for source authority, historical-artifact quarantine and remaining acceptance gates.
+See the Chinese README for the full JSON example. The release workflow selects an explicit Mihomo version and verifies its SHA-256 before packaging. The Windows service owns a protected runtime copy under `ProgramData\\MeshMux\\bin\\mihomo.exe`; explicit core updates replace that copy and installer upgrades never silently downgrade it. A release that needs Tailnet inbound forwarding must use a core build containing that feature. See [Development](docs/DEVELOPMENT.md) and [Architecture](docs/ARCHITECTURE.md) for source authority, historical-artifact quarantine and remaining acceptance gates.
 
 ## Paths
 

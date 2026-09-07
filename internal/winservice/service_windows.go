@@ -35,10 +35,6 @@ func Install(executable, configPath string) error {
 	if _, err := os.Stat(executable); err != nil {
 		return fmt.Errorf("service executable: %w", err)
 	}
-	if _, err := os.Stat(configPath); err != nil {
-		return fmt.Errorf("service config: %w", err)
-	}
-
 	manager, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("connect service manager: %w", err)
@@ -263,7 +259,7 @@ func SecureDataDir(path string) error {
 }
 
 func RunElevated(action, configPath string) error {
-	if action != "start" && action != "stop" && action != "restart" && action != "activate" {
+	if action != "start" && action != "stop" && action != "restart" && action != "activate" && action != "update-core" {
 		return fmt.Errorf("unsupported service action %q", action)
 	}
 	executable, err := os.Executable()

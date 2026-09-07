@@ -53,9 +53,6 @@ func GenerateTarget(cfg *config.Config, target config.Target) (string, error) {
 	if target.Output == "" {
 		return "", fmt.Errorf("target %q has empty output", target.Name)
 	}
-	if err := ensureProviderCaches(cfg); err != nil {
-		return "", err
-	}
 	yaml, err := Render(cfg, target)
 	if err != nil {
 		return "", err
@@ -78,7 +75,7 @@ func ensureProviderCaches(cfg *config.Config) error {
 		}
 		configured++
 		path := providerCachePath(provider)
-		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+		if data, err := os.ReadFile(path); strings.TrimSpace(provider.URL) == "" && err == nil && len(data) > 0 {
 			normalized, normalizeErr := normalizeProviderData(data)
 			if normalizeErr == nil {
 				if err := fileutil.WriteFile(path, normalized, 0600); err != nil {
@@ -262,7 +259,7 @@ func Render(cfg *config.Config, target config.Target) (string, error) {
 	renderTUN(&b, cfg, target)
 	renderDNS(&b, cfg, target)
 	renderProxies(&b, cfg, target, wgConfigs, providerProxyLines)
-	renderGroups(&b, providerProxyNames, wgNames, cfg.Tailscale.Enabled)
+	renderGroups(&b, providerProxyNames, wgNames, cfg.Tailscale.Enabled, cfg.Setup.AllowDirectOnly)
 	renderRules(&b, cfg, wgConfigs)
 
 	return strings.TrimRight(b.String(), "\n") + "\n", nil
@@ -489,12 +486,16 @@ func renderTSProxy(b *strings.Builder, cfg *config.Config, target config.Target)
 	}
 }
 
-func renderGroups(b *strings.Builder, providers, wgNames []string, tailscale bool) {
+func renderGroups(b *strings.Builder, providers, wgNames []string, tailscale, directOnly bool) {
 	linef(b, "proxy-groups:")
 	linef(b, "  - name: PROXY")
 	linef(b, "    type: select")
 	if len(providers) == 0 {
-		linef(b, "    proxies: ['DIRECT']")
+		if directOnly {
+			linef(b, "    proxies: ['DIRECT']")
+		} else {
+			linef(b, "    proxies: ['REJECT']")
+		}
 	} else {
 		linef(b, "    proxies: %s", inlineList(append(providers, "DIRECT")))
 	}

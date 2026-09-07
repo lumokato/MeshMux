@@ -1,6 +1,6 @@
 # MeshMux
 
-> **暂停安装 v0.3.1**：已确认安装失败恢复和核心更新链存在缺陷，可能导致服务不可用及系统代理残留。该版本已撤回正式推荐，修复与验收尚未完成。见 [故障记录](docs/INCIDENT-0.3.1.md)。
+> **不要安装 v0.3.1**：该版本已撤回。当前修复版本为 v0.3.2，必须使用 GitHub Actions 生成并通过确切安装包验收后再推广。
 
 MeshMux 是面向 Windows 桌面与 Linux 桌面/headless 环境的 mihomo 管理工具，用于日常代理、WireGuard、Tailscale 和移动端配置发布。
 
@@ -101,4 +101,4 @@ Android 端使用 mobile profile 接入同一套配置。MeshMux 负责生成可
 
 MeshMux 使用 MIT 许可证。安装包内置组件见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-补丁版 Mihomo 基于上游 `v1.19.29`，作为 [MeshMux 固定核心资产](https://github.com/lumokato/MeshMux/releases/tag/mihomo-v1.19.29-meshmux.2) 发布，包含二进制和对应源码包。Windows/Linux CI 下载各自固定核心二进制并校验 SHA-256；对应源码在同一核心发布中提供。
+Mihomo 核心由发布流程按明确的版本和 SHA-256 选择并校验；运行中的 Windows 服务核心单独保存在受保护的 `ProgramData\MeshMux\bin\mihomo.exe`，核心更新通过显式更新动作替换，不会因为安装器升级或托盘启动被静默降级。需要 Tailnet 入站转发时，发布流程必须使用包含该功能的 MeshMux 核心构建；不能只改下载地址而丢失功能。
