@@ -17,9 +17,8 @@ import (
 )
 
 type windowsBackend struct {
-	cfgPath       string
-	server        *webui.Server
-	proxyFailures int
+	cfgPath string
+	server  *webui.Server
 }
 
 func newPlatformBackend() (trayBackend, error) {
@@ -40,40 +39,21 @@ func (b *windowsBackend) Capabilities() trayCapabilities {
 	return trayCapabilities{SystemProxy: true}
 }
 
-func (b *windowsBackend) InitialStart() (result error) {
-	defer func() {
-		if result != nil {
-			if cfg, _, err := config.Load(b.cfgPath); err == nil && !runner.LocalProxyReady(cfg.Ports.Mixed) {
-				if err := runner.DisableOwnedProxy(cfg.Ports.Mixed); err != nil {
-					result = fmt.Errorf("%v; release system proxy: %w", result, err)
-				}
-			}
-		}
-	}()
+func (b *windowsBackend) InitialStart() error {
+	// The tray starts or observes the core only. Upstream reachability and proxy
+	// selection are independent user-visible runtime states.
 	if winservice.Installed() {
-		return b.withConfig(func(cfg *config.Config) error {
-			deadline := time.Now().Add(15 * time.Second)
-			for time.Now().Before(deadline) {
-				if runner.ControllerReady(cfg) {
-					return runner.Proxy("on", cfg.Ports.Mixed)
-				}
-				time.Sleep(250 * time.Millisecond)
-			}
-			return fmt.Errorf("MeshMux 服务尚未就绪")
-		})
+		return nil
 	}
 	return b.withConfig(func(cfg *config.Config) error {
-		if err := runner.CleanupResidual(cfg); err != nil {
-			return err
+		if runner.IsRunning(cfg) {
+			return nil
 		}
 		profile, err := generator.GenerateNamed(cfg, "windows")
 		if err != nil {
 			return err
 		}
-		if err := runner.Start(cfg, profile); err != nil {
-			return err
-		}
-		return runner.Proxy("on", cfg.Ports.Mixed)
+		return runner.Start(cfg, profile)
 	})
 }
 
@@ -93,26 +73,7 @@ func (b *windowsBackend) State() (trayState, error) {
 	} else {
 		state.CoreRunning = runner.IsRunning(cfg)
 	}
-	if err := b.reconcileProxy(cfg.Ports.Mixed); err != nil {
-		return state, err
-	}
-	state.SystemProxyOn = runner.ProxyEnabled()
 	return state, nil
-}
-
-var localProxyReady = runner.LocalProxyReady
-var disableOwnedProxy = runner.DisableOwnedProxy
-
-func (b *windowsBackend) reconcileProxy(port int) error {
-	if localProxyReady(port) {
-		b.proxyFailures = 0
-		return nil
-	}
-	b.proxyFailures++
-	if b.proxyFailures < 2 {
-		return nil
-	}
-	return disableOwnedProxy(port)
 }
 
 func (b *windowsBackend) OpenConfig() error {
@@ -135,11 +96,6 @@ func (b *windowsBackend) ToggleCore() error {
 		action := "start"
 		if winservice.Running() {
 			action = "stop"
-		}
-		if action == "stop" {
-			if err := b.withConfig(func(cfg *config.Config) error { return runner.DisableOwnedProxy(cfg.Ports.Mixed) }); err != nil {
-				return err
-			}
 		}
 		return runElevatedServiceAction(action, b.cfgPath)
 	}
