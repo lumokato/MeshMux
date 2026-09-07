@@ -498,14 +498,12 @@ func restoreRunnerHooks(t *testing.T, fake *fakeProcessSystem) {
 	oldProcessOS := processOS
 	oldLauncher := mihomoLauncher
 	oldBundledMihomoPath := bundledMihomoPath
-	oldStartupDelay := startupProbeDelay
 	oldPostStartNetwork := postStartNetworkRun
 	oldStopTimeout := stopProcessTimeout
 	oldStopPoll := stopPollInterval
 	oldStopQuiet := stopQuietPeriod
 	processOS = fake
 	bundledMihomoPath = func() string { return "" }
-	startupProbeDelay = time.Millisecond
 	stopProcessTimeout = 100 * time.Millisecond
 	stopPollInterval = time.Millisecond
 	stopQuietPeriod = 5 * time.Millisecond
@@ -513,7 +511,6 @@ func restoreRunnerHooks(t *testing.T, fake *fakeProcessSystem) {
 		processOS = oldProcessOS
 		mihomoLauncher = oldLauncher
 		bundledMihomoPath = oldBundledMihomoPath
-		startupProbeDelay = oldStartupDelay
 		postStartNetworkRun = oldPostStartNetwork
 		stopProcessTimeout = oldStopTimeout
 		stopPollInterval = oldStopPoll

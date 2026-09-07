@@ -60,32 +60,54 @@ const (
 )
 
 var serviceResumeDelay = 5 * time.Second
+var serviceCoreRetryDelay = 5 * time.Second
 
 func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
 	const accepts = svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPowerEvent
 	changes <- svc.Status{State: svc.StartPending}
-
-	cfg, _, err := load(configArgs(h.configPath))
-	if err != nil {
-		return serviceFailure(h.configPath, "load config", err)
-	}
-	// A system service owns one protected core copy. It is updated explicitly by
-	// the component updater and is independent from the install directory.
-	cfg.Components.Mihomo.Path = serviceCorePath()
-	profile := filepath.Join(filepath.Dir(h.configPath), "profiles", "windows.yaml")
-	if _, err := os.Stat(profile); err != nil {
-		return serviceFailure(h.configPath, "find generated profile", err)
-	}
-
-	core, err := startServiceCore(cfg, profile, 15*time.Second)
-	if err != nil {
-		return serviceFailure(h.configPath, "start core", err)
-	}
-	defer func() { core.cancel() }()
 	changes <- svc.Status{State: svc.Running, Accepts: accepts}
+
+	var core *serviceCore
+	var coreDone <-chan error
+	startCore := func() error {
+		cfg, _, err := load(configArgs(h.configPath))
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		// A system service owns one protected core copy. It is updated explicitly by
+		// the component updater and is independent from the install directory.
+		cfg.Components.Mihomo.Path = serviceCorePath()
+		profile := filepath.Join(filepath.Dir(h.configPath), "profiles", "windows.yaml")
+		if _, err := os.Stat(profile); err != nil {
+			return fmt.Errorf("find generated profile: %w", err)
+		}
+		replacement, err := startServiceCore(cfg, profile)
+		if err != nil {
+			return fmt.Errorf("start core: %w", err)
+		}
+		core = replacement
+		coreDone = replacement.done
+		return nil
+	}
+	stopCore := func() error {
+		if core == nil {
+			return nil
+		}
+		err := stopServiceCore(core, 8*time.Second)
+		core = nil
+		coreDone = nil
+		return err
+	}
+	defer func() {
+		if core != nil {
+			core.cancel()
+		}
+	}()
 
 	var resumeTimer *time.Timer
 	var resume <-chan time.Time
+	var retryTimer *time.Timer
+	var retry <-chan time.Time
 	stopResumeTimer := func() {
 		if resumeTimer != nil {
 			if !resumeTimer.Stop() {
@@ -98,6 +120,27 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 		resume = nil
 	}
 	defer stopResumeTimer()
+	stopRetryTimer := func() {
+		if retryTimer != nil {
+			if !retryTimer.Stop() {
+				select {
+				case <-retryTimer.C:
+				default:
+				}
+			}
+		}
+		retry = nil
+	}
+	defer stopRetryTimer()
+	scheduleRetry := func() {
+		stopRetryTimer()
+		retryTimer = time.NewTimer(serviceCoreRetryDelay)
+		retry = retryTimer.C
+	}
+	if err := startCore(); err != nil {
+		appendServiceLog(h.configPath, err.Error())
+		scheduleRetry()
+	}
 
 	for {
 		select {
@@ -114,29 +157,41 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 				resume = resumeTimer.C
 			case svc.Stop, svc.Shutdown:
 				stopResumeTimer()
+				stopRetryTimer()
 				changes <- svc.Status{State: svc.StopPending}
-				if err := stopServiceCore(core, 15*time.Second); err != nil {
+				if err := stopCore(); err != nil {
 					return serviceFailure(h.configPath, "stop core", err)
 				}
 				return false, 0
 			}
 		case <-resume:
 			resume = nil
+			stopRetryTimer()
 			appendServiceLog(h.configPath, "power resume: restarting core")
-			if err := stopServiceCore(core, 15*time.Second); err != nil {
-				return serviceFailure(h.configPath, "restart core after resume", err)
+			if err := stopCore(); err != nil {
+				appendServiceLog(h.configPath, "restart core after resume: "+err.Error())
 			}
-			replacement, err := startServiceCore(cfg, profile, 15*time.Second)
-			if err != nil {
-				return serviceFailure(h.configPath, "restart core after resume", err)
+			if err := startCore(); err != nil {
+				appendServiceLog(h.configPath, "restart core after resume: "+err.Error())
+				scheduleRetry()
+				continue
 			}
-			core = replacement
 			appendServiceLog(h.configPath, "power resume: core restarted")
-		case err := <-core.done:
+		case err := <-coreDone:
+			core = nil
+			coreDone = nil
 			if err != nil {
-				return serviceFailure(h.configPath, "run core", err)
+				appendServiceLog(h.configPath, "run core: "+err.Error())
+			} else {
+				appendServiceLog(h.configPath, "run core: process exited")
 			}
-			return false, 0
+			scheduleRetry()
+		case <-retry:
+			retry = nil
+			if err := startCore(); err != nil {
+				appendServiceLog(h.configPath, err.Error())
+				scheduleRetry()
+			}
 		}
 	}
 }
@@ -146,7 +201,7 @@ type serviceCore struct {
 	done   chan error
 }
 
-func startServiceCore(cfg *config.Config, profile string, timeout time.Duration) (*serviceCore, error) {
+func startServiceCore(cfg *config.Config, profile string) (*serviceCore, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan struct{}, 1)
 	done := make(chan error, 1)
@@ -161,14 +216,11 @@ func startServiceCore(cfg *config.Config, profile string, timeout time.Duration)
 	case err := <-done:
 		cancel()
 		if err == nil {
-			err = errors.New("core exited before reporting ready")
+			err = errors.New("core exited before process creation")
 		}
 		return nil, err
 	case <-ready:
 		return core, nil
-	case <-time.After(timeout):
-		cancel()
-		return nil, fmt.Errorf("timed out after %s", timeout)
 	}
 }
 
@@ -196,7 +248,6 @@ var (
 	windowsServiceRunning   = winservice.Running
 	windowsServiceInstalled = winservice.Installed
 	stopUserCore            = runner.Stop
-	startUserCore           = startDetached
 	prepareWindowsSnapshot  = prepareServiceSnapshot
 )
 
@@ -247,7 +298,7 @@ func manageWindowsService(args []string) error {
 			return err
 		}
 		return installWindowsService(executable, snapshotPath)
-	case "install", "activate", "activate-if-ready":
+	case "install", "activate":
 		path, err := filepath.Abs(strings.TrimSpace(*configPath))
 		if err != nil || strings.TrimSpace(*configPath) == "" {
 			return fmt.Errorf("service %s requires an absolute config path", action)
@@ -276,7 +327,7 @@ func manageWindowsService(args []string) error {
 		}
 		snapshotPath, err := prepareServiceSnapshotFiles(path)
 		if err != nil {
-			return handleSnapshotPreparationError(action, err)
+			return err
 		}
 		if err := installWindowsService(executable, snapshotPath); err != nil {
 			return err
@@ -312,57 +363,30 @@ func manageWindowsService(args []string) error {
 		fmt.Println(status)
 		return nil
 	default:
-		return fmt.Errorf("service expects register, install, activate, activate-if-ready, update-core, remove, start, stop, restart, or status")
+		return fmt.Errorf("service expects register, install, activate, update-core, remove, start, stop, restart, or status")
 	}
-}
-
-func handleSnapshotPreparationError(action string, prepareErr error) error {
-	if action != "activate-if-ready" {
-		return prepareErr
-	}
-	if windowsServiceInstalled() {
-		if startErr := controlWindowsService("start", 30*time.Second); startErr != nil {
-			return fmt.Errorf("new config validation failed: %v; previous service could not be restored: %w", prepareErr, startErr)
-		}
-		return fmt.Errorf("new config validation failed: %w; previous service was restored", prepareErr)
-	}
-	if generator.IsMissingProviderError(prepareErr) {
-		return nil
-	}
-	return prepareErr
 }
 
 func activateWindowsService(sourcePath string) error {
-	cfg, configPath, err := load(configArgs(sourcePath))
+	cfg, _, err := load(configArgs(sourcePath))
 	if err != nil {
 		return err
 	}
-	profile, err := generator.GenerateNamed(cfg, "windows")
-	if err != nil {
-		return err
+	if _, err := prepareWindowsSnapshot(sourcePath); err != nil {
+		return fmt.Errorf("prepare snapshot: %w", err)
 	}
-	if err := controlWindowsService("stop", 30*time.Second); err != nil {
-		return fmt.Errorf("stop existing service: %w", err)
+	if windowsServiceRunning() {
+		if err := controlWindowsService("stop", 15*time.Second); err != nil {
+			return fmt.Errorf("stop existing service: %w", err)
+		}
 	}
 	if err := stopUserCore(cfg); err != nil {
 		return fmt.Errorf("stop existing user core: %w", err)
 	}
-	if _, err := prepareWindowsSnapshot(sourcePath); err != nil {
-		if restoreErr := startUserCore(cfg, configPath, profile); restoreErr != nil {
-			return fmt.Errorf("prepare snapshot: %v; restore user core: %w", err, restoreErr)
-		}
-		return fmt.Errorf("prepare snapshot: %w; previous user core was restored", err)
+	if err := controlWindowsService("start", 15*time.Second); err != nil {
+		return fmt.Errorf("start service: %w", err)
 	}
-	startErr := controlWindowsService("start", 30*time.Second)
-	if startErr == nil {
-		return nil
-	}
-	_ = controlWindowsService("stop", 15*time.Second)
-	restoreErr := startUserCore(cfg, configPath, profile)
-	if restoreErr != nil {
-		return fmt.Errorf("start service: %v; restore user core: %w", startErr, restoreErr)
-	}
-	return fmt.Errorf("start service: %w; previous user core was restored", startErr)
+	return nil
 }
 
 func restartWindowsService(action, sourcePath string) error {
@@ -373,27 +397,19 @@ func restartWindowsService(action, sourcePath string) error {
 	if err != nil {
 		return err
 	}
-	backup, err := captureServiceSnapshot(cfg)
-	if err != nil {
-		return fmt.Errorf("backup service snapshot: %w", err)
+	if _, err := prepareWindowsSnapshot(sourcePath); err != nil {
+		return fmt.Errorf("prepare service snapshot: %w", err)
 	}
-	if action == "restart" {
-		if err := controlWindowsService("stop", 30*time.Second); err != nil {
-			cause := fmt.Errorf("stop existing service: %w", err)
-			if restoreErr := restoreServiceSnapshot(backup); restoreErr != nil {
-				return fmt.Errorf("%v; restore previous service snapshot: %w", cause, restoreErr)
-			}
-			return cause
+	if action == "restart" && windowsServiceRunning() {
+		if err := controlWindowsService("stop", 15*time.Second); err != nil {
+			return fmt.Errorf("stop existing service: %w", err)
 		}
 	}
 	if err := stopUserCore(cfg); err != nil {
-		return restoreStoppedService(backup, fmt.Errorf("stop existing user core: %w", err))
+		return fmt.Errorf("stop existing user core: %w", err)
 	}
-	if _, err := prepareWindowsSnapshot(sourcePath); err != nil {
-		return restoreStoppedService(backup, fmt.Errorf("prepare service snapshot: %w", err))
-	}
-	if err := controlWindowsService("start", 30*time.Second); err != nil {
-		return restoreStoppedService(backup, fmt.Errorf("start service: %w", err))
+	if err := controlWindowsService("start", 15*time.Second); err != nil {
+		return fmt.Errorf("start service: %w", err)
 	}
 	return nil
 }
@@ -469,20 +485,6 @@ func captureServiceSnapshot(incoming ...*config.Config) ([]snapshotFileBackup, e
 		backup = append(backup, snapshotFileBackup{path: path, data: data, exists: true})
 	}
 	return backup, nil
-}
-
-func restoreStoppedService(backup []snapshotFileBackup, cause error) error {
-	// A failed start may still be pending or restarting under SCM recovery.
-	if err := controlWindowsService("stop", 30*time.Second); err != nil {
-		return fmt.Errorf("%v; cannot stop failed service before snapshot restore: %w", cause, err)
-	}
-	if err := restoreServiceSnapshot(backup); err != nil {
-		return fmt.Errorf("%v; restore previous service snapshot: %w", cause, err)
-	}
-	if err := controlWindowsService("start", 30*time.Second); err != nil {
-		return fmt.Errorf("%v; restart previous service snapshot: %w", cause, err)
-	}
-	return fmt.Errorf("%w; previous service snapshot was restored", cause)
 }
 
 func controlServiceWithDiagnostics(action string, timeout time.Duration) error {
@@ -646,12 +648,6 @@ func updateInstalledServiceCore(sourcePath string) error {
 	if _, err := os.Stat(sourcePath); err != nil {
 		return err
 	}
-	target := serviceCorePath()
-	previousCore, previousErr := os.ReadFile(target)
-	previousExists := previousErr == nil
-	if previousErr != nil && !os.IsNotExist(previousErr) {
-		return fmt.Errorf("read existing service core: %w", previousErr)
-	}
 	running := winservice.Running()
 	if running {
 		if err := controlWindowsService("stop", 30*time.Second); err != nil {
@@ -666,25 +662,8 @@ func updateInstalledServiceCore(sourcePath string) error {
 	}
 	if running {
 		if err := controlWindowsService("start", 30*time.Second); err != nil {
-			restoreErr := restoreServiceCore(target, previousCore, previousExists)
-			if restoreErr == nil {
-				restoreErr = controlWindowsService("start", 30*time.Second)
-			}
-			if restoreErr != nil {
-				return fmt.Errorf("restart service after core update: %v; restore previous core: %w", err, restoreErr)
-			}
-			return fmt.Errorf("restart service after core update: %w; previous core was restored", err)
+			return fmt.Errorf("restart service after core update: %w", err)
 		}
-	}
-	return nil
-}
-
-func restoreServiceCore(path string, data []byte, exists bool) error {
-	if exists {
-		return fileutil.WriteFile(path, data, 0700)
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
 	}
 	return nil
 }

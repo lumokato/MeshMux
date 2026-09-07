@@ -41,7 +41,6 @@ type launchedProcess struct {
 var (
 	mihomoLauncher      = launchMihomoProcess
 	bundledMihomoPath   = config.BundledMihomoPath
-	startupProbeDelay   = 1200 * time.Millisecond
 	postStartNetworkRun = postStartNetwork
 )
 
@@ -81,14 +80,16 @@ func runManaged(ctx context.Context, cfg *config.Config, profile string, supervi
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if cfg.TUN.Enabled && !canStartTUN() {
-		return errors.New(tunUnavailableMessage())
-	}
 	unlock, err := fileutil.TryLock(filepath.Join("state", "core-operation.lock"))
 	if err != nil {
 		return err
 	}
-	defer unlock()
+	released := false
+	defer func() {
+		if !released {
+			unlock()
+		}
+	}()
 	if err := stopManaged(cfg); err != nil {
 		return err
 	}
@@ -137,36 +138,22 @@ func runManaged(ctx context.Context, cfg *config.Config, profile string, supervi
 		_ = errLog.Close()
 		done <- err
 	}(process.pid)
-	startupTimer := time.NewTimer(startupProbeDelay)
-	defer startupTimer.Stop()
-	select {
-	case err := <-done:
-		if current, readErr := readPID(); readErr == nil && current == process.pid {
-			_ = clearPID()
-		}
-		if err == nil {
-			err = errors.New("process exited")
-		}
-		return fmt.Errorf("mihomo exited immediately: %w%s", err, recentCoreLog())
-	case <-ctx.Done():
-		unlock()
-		return stopAfterCancellation(cfg, process.pid, done, ctx.Err())
-	case <-startupTimer.C:
-	}
 	unlock()
+	released = true
+	// Process creation is the only synchronous startup gate. TUN creation,
+	// Tailnet login, controller reachability and route/DNS cleanup are runtime
+	// states and must not delay or invalidate service registration.
 	if ready != nil {
-		pid := process.pid
-		if current, ok := PID(cfg); ok && current == process.pid {
-			pid = current
-		}
-		if err := ready(pid); err != nil {
+		if err := ready(process.pid); err != nil {
 			_ = Stop(cfg)
 			return fmt.Errorf("report supervised start: %w", err)
 		}
 	}
-	if err := postStartNetworkRun(cfg); err != nil {
-		appendRunnerLog("网络后处理失败: %v", err)
-	}
+	go func() {
+		if err := postStartNetworkRun(cfg); err != nil {
+			appendRunnerLog("网络后处理失败: %v", err)
+		}
+	}()
 	if supervise {
 		select {
 		case err := <-done:
@@ -270,18 +257,25 @@ func stopManaged(cfg *config.Config) error {
 	deadline := time.Now().Add(stopProcessTimeout)
 	var lastKillErr error
 	var quietSince time.Time
+	_, pidAtEntryErr := readPID()
+	hadRuntimeState := pidAtEntryErr == nil
 	for {
 		pids, err := managedPIDs(cfg)
 		if err != nil {
 			return fmt.Errorf("发现受管 mihomo 进程失败: %w", err)
 		}
 		for _, pid := range pids {
+			hadRuntimeState = true
 			if err := processOS.kill(pid); err != nil {
 				lastKillErr = err
 			}
 		}
 		if len(pids) == 0 {
 			if err := waitPortsFree(ports, 0); err == nil {
+				if !hadRuntimeState {
+					_ = clearPID()
+					return nil
+				}
 				if quietSince.IsZero() {
 					quietSince = time.Now()
 				}

@@ -26,7 +26,12 @@ func postStartNetwork(cfg *config.Config) error {
 		routes = append(routes, route)
 	}
 
-	script := buildPostStartNetworkScript(routes, dnsDisabled(cfg), !cfg.TUN.AutoRoute)
+	clearDNS := dnsDisabled(cfg)
+	addRoutes := !cfg.TUN.AutoRoute && len(routes) > 0
+	if !clearDNS && !addRoutes {
+		return nil
+	}
+	script := buildPostStartNetworkScript(routes, clearDNS, addRoutes)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)

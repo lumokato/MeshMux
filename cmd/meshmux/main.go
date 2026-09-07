@@ -420,7 +420,8 @@ func checkConfig(args []string, output io.Writer) error {
 		problems = append(problems, "one or more WireGuard config files are missing or empty")
 	}
 	if len(problems) > 0 {
-		return fmt.Errorf("configuration is incomplete: %s", strings.Join(problems, "; "))
+		fmt.Fprintf(output, "result: degraded: %s\n", strings.Join(problems, "; "))
+		return nil
 	}
 	fmt.Fprintln(output, "result: ready")
 	return nil

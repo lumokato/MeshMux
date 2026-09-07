@@ -109,7 +109,7 @@ func TestServiceRestartsCoreOnceAfterResumeEvents(t *testing.T) {
 	}
 }
 
-func TestServiceResumeFailureReturnsErrorWithoutPanic(t *testing.T) {
+func TestServiceResumeFailureKeepsServiceAliveAndRetries(t *testing.T) {
 	home := t.TempDir()
 	restoreWorkingDir(t)
 	configPath := filepath.Join(home, config.DefaultConfigPath)
@@ -122,29 +122,49 @@ func TestServiceResumeFailureReturnsErrorWithoutPanic(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, "profiles", "windows.yaml"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	originalRun, originalDelay := runServiceCore, serviceResumeDelay
+	originalRun, originalResumeDelay, originalRetryDelay := runServiceCore, serviceResumeDelay, serviceCoreRetryDelay
 	t.Cleanup(func() {
-		runServiceCore, serviceResumeDelay = originalRun, originalDelay
+		runServiceCore, serviceResumeDelay, serviceCoreRetryDelay = originalRun, originalResumeDelay, originalRetryDelay
 	})
 	serviceResumeDelay = time.Millisecond
+	serviceCoreRetryDelay = time.Millisecond
 	attempts := 0
+	started := make(chan struct{}, 3)
 	runServiceCore = func(ctx context.Context, _ *config.Config, _ string, ready func(int) error) error {
 		attempts++
 		if attempts == 2 {
 			return errors.New("replacement failed")
 		}
+		started <- struct{}{}
 		if err := ready(100); err != nil {
 			return err
 		}
 		<-ctx.Done()
 		return nil
 	}
-	requests := make(chan svc.ChangeRequest, 1)
+	requests := make(chan svc.ChangeRequest, 2)
 	requests <- svc.ChangeRequest{Cmd: svc.PowerEvent, EventType: powerEventResumeAutomatic}
 	changes := make(chan svc.Status, 8)
-	specific, code := (&serviceHandler{configPath: configPath}).Execute(nil, requests, changes)
-	if !specific || code != 1 || attempts != 2 {
-		t.Fatalf("result=(%v, %d), attempts=%d", specific, code, attempts)
+	done := make(chan struct {
+		specific bool
+		code     uint32
+	}, 1)
+	go func() {
+		specific, code := (&serviceHandler{configPath: configPath}).Execute(nil, requests, changes)
+		done <- struct {
+			specific bool
+			code     uint32
+		}{specific: specific, code: code}
+	}()
+	waitServiceStatus(t, changes, svc.StartPending)
+	waitServiceStatus(t, changes, svc.Running)
+	waitSignal(t, started, "initial core start")
+	waitSignal(t, started, "retry after resume failure")
+	requests <- svc.ChangeRequest{Cmd: svc.Stop}
+	waitServiceStatus(t, changes, svc.StopPending)
+	result := <-done
+	if result.specific || result.code != 0 || attempts < 3 {
+		t.Fatalf("result=(%v, %d), attempts=%d", result.specific, result.code, attempts)
 	}
 	data, err := os.ReadFile(filepath.Join(home, "logs", "service.log"))
 	if err != nil || !strings.Contains(string(data), "replacement failed") {
@@ -208,7 +228,7 @@ func TestWriteWindowsCommandResultRecordsSuccessAndFailure(t *testing.T) {
 	}
 }
 
-func TestActivateWindowsServiceRestoresUserCoreWhenServiceStartFails(t *testing.T) {
+func TestActivateWindowsServiceDoesNotRollbackAfterServiceStartFailure(t *testing.T) {
 	home := t.TempDir()
 	restoreWorkingDir(t)
 	t.Setenv("MESHMUX_HOME", home)
@@ -219,15 +239,16 @@ func TestActivateWindowsServiceRestoresUserCoreWhenServiceStartFails(t *testing.
 
 	originalControl := controlWindowsService
 	originalStop := stopUserCore
-	originalStart := startUserCore
 	originalPrepare := prepareWindowsSnapshot
+	originalRunning := windowsServiceRunning
 	t.Cleanup(func() {
 		controlWindowsService = originalControl
 		stopUserCore = originalStop
-		startUserCore = originalStart
 		prepareWindowsSnapshot = originalPrepare
+		windowsServiceRunning = originalRunning
 	})
 	var actions []string
+	windowsServiceRunning = func() bool { return false }
 	controlWindowsService = func(action string, _ time.Duration) error {
 		actions = append(actions, action)
 		if action == "start" {
@@ -239,23 +260,16 @@ func TestActivateWindowsServiceRestoresUserCoreWhenServiceStartFails(t *testing.
 		actions = append(actions, "stop-user")
 		return nil
 	}
-	startUserCore = func(_ *config.Config, gotConfig, gotProfile string) error {
-		actions = append(actions, "restore-user")
-		if gotConfig != configPath || !strings.HasSuffix(gotProfile, filepath.Join("profiles", "windows.yaml")) {
-			t.Fatalf("restore paths = %q, %q", gotConfig, gotProfile)
-		}
-		return nil
-	}
 	prepareWindowsSnapshot = func(string) (string, error) {
 		actions = append(actions, "prepare")
 		return configPath, nil
 	}
 
 	err := activateWindowsService(configPath)
-	if err == nil || !strings.Contains(err.Error(), "previous user core was restored") {
+	if err == nil || !strings.Contains(err.Error(), "start service") {
 		t.Fatalf("activate error = %v", err)
 	}
-	want := []string{"stop", "stop-user", "prepare", "start", "stop", "restore-user"}
+	want := []string{"prepare", "stop-user", "start"}
 	if strings.Join(actions, ",") != strings.Join(want, ",") {
 		t.Fatalf("actions = %v, want %v", actions, want)
 	}
@@ -299,13 +313,13 @@ func TestRestartWindowsServiceStopsServiceBeforeUserCore(t *testing.T) {
 	if err := restartWindowsService("restart", configPath); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"stop", "stop-user", "prepare", "start"}
+	want := []string{"prepare", "stop", "stop-user", "start"}
 	if strings.Join(actions, ",") != strings.Join(want, ",") {
 		t.Fatalf("actions = %v, want %v", actions, want)
 	}
 }
 
-func TestRestartWindowsServiceRestoresSnapshotWhenStartFails(t *testing.T) {
+func TestRestartWindowsServiceDoesNotRetryStartOrRestoreSnapshot(t *testing.T) {
 	home := t.TempDir()
 	programData := t.TempDir()
 	restoreWorkingDir(t)
@@ -342,9 +356,7 @@ func TestRestartWindowsServiceRestoresSnapshotWhenStartFails(t *testing.T) {
 	controlWindowsService = func(action string, _ time.Duration) error {
 		if action == "start" {
 			starts++
-			if starts == 1 {
-				return errors.New("new service failed")
-			}
+			return errors.New("new service failed")
 		}
 		return nil
 	}
@@ -360,21 +372,21 @@ func TestRestartWindowsServiceRestoresSnapshotWhenStartFails(t *testing.T) {
 	}
 
 	err := restartWindowsService("restart", configPath)
-	if err == nil || !strings.Contains(err.Error(), "previous service snapshot was restored") {
+	if err == nil || !strings.Contains(err.Error(), "start service") {
 		t.Fatalf("restart error = %v", err)
 	}
-	if starts != 2 {
-		t.Fatalf("service starts = %d, want 2", starts)
+	if starts != 1 {
+		t.Fatalf("service starts = %d, want 1", starts)
 	}
-	if data, _ := os.ReadFile(serviceConfig); string(data) != "old-config" {
-		t.Fatalf("restored config = %q", data)
+	if data, _ := os.ReadFile(serviceConfig); string(data) != "new-config" {
+		t.Fatalf("current config = %q", data)
 	}
-	if data, _ := os.ReadFile(serviceProfile); string(data) != "old-profile" {
-		t.Fatalf("restored profile = %q", data)
+	if data, _ := os.ReadFile(serviceProfile); string(data) != "new-profile" {
+		t.Fatalf("current profile = %q", data)
 	}
 }
 
-func TestRestartWindowsServiceRestoresSnapshotWhenStopFails(t *testing.T) {
+func TestRestartWindowsServiceLeavesPreparedSnapshotWhenStopFails(t *testing.T) {
 	home := t.TempDir()
 	programData := t.TempDir()
 	restoreWorkingDir(t)
@@ -430,11 +442,11 @@ func TestRestartWindowsServiceRestoresSnapshotWhenStopFails(t *testing.T) {
 	if err := restartWindowsService("restart", configPath); err == nil || !strings.Contains(err.Error(), "stop existing service") {
 		t.Fatalf("restart error = %v", err)
 	}
-	if data, _ := os.ReadFile(serviceConfig); string(data) != "old-config" {
-		t.Fatalf("restored config = %q", data)
+	if data, _ := os.ReadFile(serviceConfig); string(data) != "new-config" {
+		t.Fatalf("current config = %q", data)
 	}
-	if data, _ := os.ReadFile(serviceProfile); string(data) != "old-profile" {
-		t.Fatalf("restored profile = %q", data)
+	if data, _ := os.ReadFile(serviceProfile); string(data) != "new-profile" {
+		t.Fatalf("current profile = %q", data)
 	}
 }
 
@@ -491,12 +503,18 @@ func TestActivateWindowsServiceDoesNotStopUserCoreWhenServiceStopFails(t *testin
 
 	originalControl := controlWindowsService
 	originalStop := stopUserCore
+	originalRunning := windowsServiceRunning
+	originalPrepare := prepareWindowsSnapshot
 	t.Cleanup(func() {
 		controlWindowsService = originalControl
 		stopUserCore = originalStop
+		windowsServiceRunning = originalRunning
+		prepareWindowsSnapshot = originalPrepare
 	})
 	stoppedUser := false
+	windowsServiceRunning = func() bool { return true }
 	controlWindowsService = func(string, time.Duration) error { return errors.New("stop failed") }
+	prepareWindowsSnapshot = func(string) (string, error) { return configPath, nil }
 	stopUserCore = func(*config.Config) error {
 		stoppedUser = true
 		return nil
@@ -569,35 +587,6 @@ func TestSnapshotReferencedAssetsRejectsEscapingPath(t *testing.T) {
 	cfg := &config.Config{WireGuard: config.WireGuard{Configs: []string{filepath.Join("..", "secret.conf")}}}
 	if err := snapshotReferencedAssets(cfg, t.TempDir()); err == nil || !strings.Contains(err.Error(), "escapes") {
 		t.Fatalf("escaping path error = %v", err)
-	}
-}
-
-func TestActivateIfReadyRestoresInstalledServiceAfterAnyValidationFailure(t *testing.T) {
-	originalInstalled := windowsServiceInstalled
-	originalControl := controlWindowsService
-	t.Cleanup(func() {
-		windowsServiceInstalled = originalInstalled
-		controlWindowsService = originalControl
-	})
-	windowsServiceInstalled = func() bool { return true }
-	started := false
-	controlWindowsService = func(action string, _ time.Duration) error {
-		started = action == "start"
-		return nil
-	}
-	err := handleSnapshotPreparationError("activate-if-ready", errors.New("invalid configuration"))
-	if err == nil || !strings.Contains(err.Error(), "previous service was restored") || !started {
-		t.Fatalf("recovery result = %v, started = %v", err, started)
-	}
-}
-
-func TestActivateIfReadyDoesNotHideUnexpectedFirstInstallFailure(t *testing.T) {
-	originalInstalled := windowsServiceInstalled
-	t.Cleanup(func() { windowsServiceInstalled = originalInstalled })
-	windowsServiceInstalled = func() bool { return false }
-	want := errors.New("invalid configuration")
-	if got := handleSnapshotPreparationError("activate-if-ready", want); !errors.Is(got, want) {
-		t.Fatalf("first-install error = %v", got)
 	}
 }
 
@@ -680,11 +669,7 @@ func TestRestartRollsBackPartiallyWrittenAssetsOnPrepareFailure(t *testing.T) {
 	if err := restartWindowsService("restart", source); err == nil {
 		t.Fatal("expected preparation failure")
 	}
-	data, err := os.ReadFile(cache)
-	if err != nil || string(data) != "old-cache" {
-		t.Fatalf("partial cache survived: %q %v", data, err)
-	}
-	if strings.Join(actions, ",") != "stop,stop,start" {
-		t.Fatalf("actions=%v", actions)
+	if len(actions) != 0 {
+		t.Fatalf("service control ran before snapshot preparation completed: %v", actions)
 	}
 }

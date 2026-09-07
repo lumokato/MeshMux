@@ -8,6 +8,30 @@ import (
 	"testing"
 )
 
+func TestBundledTemplateDefaultsToTUNAutoRoute(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "templates", "meshmux.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.TUN.Enabled || !cfg.TUN.AutoRoute || !cfg.TUN.AutoDetectInterface {
+		t.Fatalf("template TUN defaults = %+v", cfg.TUN)
+	}
+}
+
+func TestExistingConfigPreservesExplicitTUNDisable(t *testing.T) {
+	cfg, _, err := loadData([]byte(`{"setup":{"allowDirectOnly":true},"tun":{"enabled":false,"autoRoute":false}}`), "existing.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TUN.Enabled || cfg.TUN.AutoRoute {
+		t.Fatalf("explicit TUN disable changed = %+v", cfg.TUN)
+	}
+}
+
 func TestEnsureLocalConfigMigratesRealLegacyOverBootstrapTemplate(t *testing.T) {
 	root := t.TempDir()
 	local := filepath.Join(root, "Local", AppName)

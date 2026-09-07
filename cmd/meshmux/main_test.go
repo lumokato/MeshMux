@@ -172,7 +172,7 @@ func TestConfigCheckResolvesAssetsRelativeToExplicitConfig(t *testing.T) {
 		}
 	}
 }
-func TestConfigCheckRejectsMissingDailyProxyAndTailnetAuth(t *testing.T) {
+func TestConfigCheckReportsMissingRuntimeInputsAsDegraded(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("MESHMUX_HOME", home)
 	path := filepath.Join(home, config.DefaultConfigPath)
@@ -188,11 +188,11 @@ func TestConfigCheckRejectsMissingDailyProxyAndTailnetAuth(t *testing.T) {
 
 	var output bytes.Buffer
 	err = checkConfig([]string{"-config", path}, &output)
-	if err == nil || !strings.Contains(err.Error(), "daily proxy") || !strings.Contains(err.Error(), "auth key") {
+	if err != nil {
 		t.Fatalf("config-check error = %v", err)
 	}
-	if strings.Contains(output.String(), "result: ready") {
-		t.Fatalf("incomplete config reported ready: %s", output.String())
+	if !strings.Contains(output.String(), "result: degraded:") || !strings.Contains(output.String(), "daily proxy") || !strings.Contains(output.String(), "auth key") {
+		t.Fatalf("degraded config output = %s", output.String())
 	}
 }
 

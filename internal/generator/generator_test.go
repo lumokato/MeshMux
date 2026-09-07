@@ -21,7 +21,7 @@ func TestProviderCacheRequiredUnlessDirectOnlyIsExplicit(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(old) })
 
 	cfg := &config.Config{Providers: []config.Provider{{Name: "main", Path: filepath.Join("providers", "main.yaml")}}}
-	if err := ensureProviderCaches(cfg); err == nil || !IsMissingProviderError(err) {
+	if err := ensureProviderCaches(cfg); err == nil || !strings.Contains(err.Error(), "missing daily proxy provider") {
 		t.Fatalf("missing provider error = %v", err)
 	}
 	cfg.Setup.AllowDirectOnly = true

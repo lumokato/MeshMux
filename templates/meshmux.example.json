@@ -17,9 +17,9 @@
   },
   "components": {},
   "tun": {
-    "enabled": false,
+    "enabled": true,
     "stack": "mixed",
-    "autoRoute": false,
+    "autoRoute": true,
     "autoDetectInterface": true,
     "strictRoute": false,
     "dnsHijack": []

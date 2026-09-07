@@ -1,6 +1,5 @@
 # MeshMux
-
-> **不要安装 v0.3.1**：该版本已撤回。当前修复版本为 v0.3.2，必须使用 GitHub Actions 生成并通过确切安装包验收后再推广。
+> v0.3.1 已撤回，v0.3.2 是历史修复版本。当前源码发布必须使用 GitHub Actions 显式生成新的版本号并通过确切安装包验收。
 
 MeshMux 是面向 Windows 桌面与 Linux 桌面/headless 环境的 mihomo 管理工具，用于日常代理、WireGuard、Tailscale 和移动端配置发布。
 
@@ -27,7 +26,7 @@ English README: [README.en.md](README.en.md)
 
 1. 安装并启动 MeshMux。
 2. 右键托盘图标，打开配置页面。
-3. 填入日常代理订阅；只有确实不使用订阅时才勾选“仅直连模式”。缺少订阅链接且没有有效缓存时，MeshMux 会拒绝保存或启动，不再静默生成全 `DIRECT`。
+3. 填入日常代理订阅；只有确实不使用订阅时才勾选“仅直连模式”。缺少订阅链接且没有有效缓存时，MeshMux 仍会启动并显示降级状态，代理组不会伪装成可用节点。
 4. 按需导入 WireGuard 配置，按需启用 Tailscale。
 5. 如需 Tailnet 入站，在高级页面按“名称,协议,监听端口,目标地址”填写映射。
 6. 保存配置，生成 Windows/mobile profile。
@@ -91,7 +90,7 @@ C:\Program Files\MeshMux
 
 Linux 可使用 `meshmux run linux` 运行常驻核心，使用 `meshmux serve` 提供仅监听 loopback 的配置页面。仓库中的 `packaging/linux` 包含 systemd 单元、XFCE 登录自启动项和受限 sudoers 部署示例；在其他账户或目录安装前需要按实际环境调整。核心服务与托盘相互独立：退出托盘不会停止代理，无图形会话时也不会额外启动托盘。
 
-使用 `meshmux config-check -config <配置路径>` 可以只读检查配置完整性。命令只输出订阅、缓存、Tailnet 鉴权、WireGuard 和入站映射是否已配置，不启动核心、不开临时端口，也不会输出订阅地址、Auth Key 或私钥。
+使用 `meshmux config-check -config <配置路径>` 可以只读检查运行所需输入。命令只输出订阅、缓存、Tailnet 鉴权、WireGuard 和入站映射是否已配置，不启动核心、不开临时端口，也不会输出订阅地址、Auth Key 或私钥。缺少运行输入时输出 `degraded`，但不阻止管理器或核心启动。缺少运行输入时输出 `degraded`，但不阻止管理器或核心启动。
 
 ## 手机端
 

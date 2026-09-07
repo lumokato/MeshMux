@@ -20,10 +20,6 @@ import (
 
 var errMissingProvider = errors.New("missing daily proxy provider")
 
-func IsMissingProviderError(err error) bool {
-	return errors.Is(err, errMissingProvider)
-}
-
 func GenerateAll(cfg *config.Config) ([]string, error) {
 	var written []string
 	for _, target := range cfg.Targets {

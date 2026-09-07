@@ -1,6 +1,6 @@
 # MeshMux
 
-> **Do not install v0.3.1.** That release was withdrawn. The replacement line is v0.3.2; its exact installer and Linux archive must be generated and accepted before promotion.
+> v0.3.1 was withdrawn and v0.3.2 is historical context. The current source must be built under an explicit new version and accepted as an exact installer and Linux archive before promotion.
 
 MeshMux manages mihomo-based proxy, WireGuard, Tailscale, and mobile profile publishing on Windows desktops and Linux desktop/headless environments.
 
@@ -55,7 +55,7 @@ Logs rotate automatically by size. `mihomo.out.log` and `mihomo.err.log` are lim
 
 Linux can run the persistent core with `meshmux run linux` and expose the configuration page on loopback with `meshmux serve`. The `packaging/linux` directory contains systemd units, an XFCE login entry, and restricted sudoers deployment examples; adjust their user and paths before installing them in another environment. The tray is independent from the core: exiting it does not stop the proxy, and no tray process runs without a graphical session.
 
-Use `meshmux config-check -config <config-path>` for a read-only completeness check. It reports whether the provider, cache, Tailnet authentication, WireGuard files, and inbound forwards are configured without starting the core, opening a temporary listener, or printing subscription URLs, auth keys, or private keys.
+Use `meshmux config-check -config <config-path>` for a read-only runtime-input check. It reports whether the provider, cache, Tailnet authentication, WireGuard files, and inbound forwards are configured without starting the core, opening a temporary listener, or printing subscription URLs, auth keys, or private keys. Missing runtime inputs are reported as `degraded`; they do not prevent the manager or core from starting. Missing runtime inputs are reported as `degraded`; they do not prevent the manager or core from starting.
 
 ## License
 

@@ -186,7 +186,7 @@
     const runtimeTarget = '{{RUNTIME_TARGET}}';
     const runtimeTargetTemplate = {name:'{{RUNTIME_TARGET}}', type:'{{RUNTIME_TARGET_TYPE}}', hostname:'{{RUNTIME_HOSTNAME}}', output:'{{RUNTIME_OUTPUT}}'};
     let cfg = {};
-    let mode = 'proxy';
+    let mode = 'tun';
     function el(id){ return document.getElementById(id); }
     function val(id){ return el(id).value.trim(); }
     function setVal(id,v){ el(id).value = v == null ? '' : String(v); }

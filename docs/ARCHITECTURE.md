@@ -1,6 +1,6 @@
 # MeshMux Architecture
 
-> The 0.3.1 installation incident supersedes prior release-readiness conclusions below. See INCIDENT-0.3.1.md for confirmed defects, local patch status and remaining installation/update gates.
+> The 0.3.1 installation incident and the 0.3.2 follow-up fixes are historical context. The current release line is generated from this source tree and must pass the current test and installation gates; see INCIDENT-0.3.1.md for the original defect record.
 
 ## Ownership and data flow
 
@@ -16,6 +16,8 @@
 
 CLI/tray -> config -> generator -> runner -> mihomo. Web actions call the same packages. Windows SCM runs the CLI supervisor, not the tray.
 
+Windows SCM service readiness means the MeshMux supervisor is available. Mihomo process creation, TUN adapter state, Tailnet login, controller reachability and proxy-node health are separate runtime states. The service stays manageable and retries the core after a core failure; it must not exit or roll back installation merely because a network component is slow or unavailable. New configurations default to TUN with automatic routing, while an existing explicit TUN disable remains unchanged.
+
 ## State and compatibility
 
 One process uses one runtime directory as its working directory. Windows uses the configuration directory. Linux honors an explicit absolute MESHMUX_HOME, otherwise uses the configuration directory. Relative provider, profile, component and state paths resolve there. Do not call os.Chdir inside HTTP handlers or introduce multiple runtime roots in one process without first removing this process-global contract.
@@ -26,7 +28,7 @@ Released installations exist. Legacy AppData configuration recovery and old comp
 
 ## September 2026 review
 
-Included in MeshMux 0.3.1:
+Earlier 0.3.x work included:
 
 - Replaced truncate/delete-before-rename writes for configuration, generated profiles, caches, service snapshots, bundled binaries and component records with staged replacement. Failed writes leave previous files intact.
 - Removed regex/indentation-dependent provider parsing. YAML now accepts flow lists, indentationless lists and reordered fields, and rejects duplicate or missing names and multiple documents.
@@ -50,6 +52,6 @@ Full Windows/Linux tests, vet, module verification and manager builds passed, in
 - Downloads require an explicit component SHA-256 or a GitHub asset SHA-256 digest. Missing or mismatched checksums fail before installation. The default core selector may follow the newest matching MeshMux core asset, but a release must still select and record one tested core/source pair; changing the core repository alone must not silently remove MeshMux-specific features.
 - Downloads are capped at 512 MiB, extracted payloads at 1 GiB and archive entries at 20,000. Limit and malicious-archive tests pass.
 - Service, service-command and tray diagnostics now use the shared sanitized rotating writer, 2 MiB per file and two backups, with cross-process append locking.
-- The service-owned Windows core is kept under protected `ProgramData\\MeshMux\\bin\\mihomo.exe`. Installer registration initializes it only when absent; explicit core updates replace it while the service is stopped and restore the previous core if restart fails. Installer upgrades do not silently downgrade the service-owned core.
+- The service-owned Windows core is kept under protected `ProgramData\\MeshMux\\bin\\mihomo.exe`. Installer registration initializes it only when absent; explicit core updates replace it while the service is stopped and report a restart failure without silently restoring or retrying an older core. Installer upgrades do not silently downgrade the service-owned core.
 
 Do not interpret this review as proof that every defect has been eliminated.
