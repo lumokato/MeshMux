@@ -19,18 +19,128 @@ permissions:
 
 env:
   INPUT_VERSION: ${{ inputs.version }}
-  MIHOMO_LINUX_SHA256: C084C4EE28F8A4581D5A620C7C0806D1FF2EB9B392ECC6DEA9C475A9DC45D2E1
   DASHBOARD_VERSION: v1.273.0
   DASHBOARD_SHA256: 076e05d2e3dc6641a0ec281aa4b97a18193fbcc379d139762c32d90adb22793c
   GEOIP_SHA256: 185CB54663CBC89D5325D5249AFDAE99DEF292A0EDD10539F8A05218A896602F
   DEVELOPMENT_VERSION: 0.3.6
-  MIHOMO_CORE_VERSION: v1.19.30-meshmux.1
-  MIHOMO_CORE_SHA256: B4C765158AB25D6F42BAA91AA1E719DB0179BB218380130462504B52FC3A563E
-  MIHOMO_SOURCE_SHA256: 8FDD6EAB7ABECD1486BB75A0232275C1946F6F0DA823D8F9943C49304D00BD01
+  # Upstream mihomo. Record the exact asset hashes before publishing: download
+  # the assets once, hash them, and fill the values in. The build fails on
+  # purpose while they are empty rather than skipping checksum verification.
+  #   https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.30
+  MIHOMO_UPSTREAM_VERSION: v1.19.30
+  MIHOMO_UPSTREAM_WINDOWS_SHA256: ""
+  MIHOMO_UPSTREAM_LINUX_SHA256: ""
+  # Upstream tailscale rebuild: built from the official tag with no source
+  # changes (see THIRD_PARTY_NOTICES.md). Upstream does not publish raw
+  # tailscaled binaries for Windows and macOS, so MeshMux builds its own from
+  # the same commit and records the version here.
+  TAILSCALE_VERSION: v1.102.4
+  WINTUN_VERSION: "0.14.1"
+  # From https://www.wintun.net/ (build zip SHA-256). Required for the
+  # windows tailscaled archive; empty means the build fails.
+  WINTUN_SHA256: ""
 
 jobs:
+  tailscale-components:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go for the tailscale rebuild
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+
+      - name: Resolve version
+        shell: bash
+        run: |
+          version="$INPUT_VERSION"
+          if [[ -z "$version" && "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          if [[ -z "$version" ]]; then
+            version="$DEVELOPMENT_VERSION"
+          fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid release version" >&2; exit 1; }
+          echo "MESHMUX_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build upstream tailscale binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$TAILSCALE_VERSION" \
+            https://github.com/tailscale/tailscale "$RUNNER_TEMP/ts-src"
+          cd "$RUNNER_TEMP/ts-src"
+          go mod download
+          for target in "windows amd64" "linux amd64" "darwin amd64"; do
+            set -- $target
+            os="$1"; arch="$2"
+            ext=""
+            [[ "$os" == "windows" ]] && ext=".exe"
+            out="$RUNNER_TEMP/tsbuild/$os-$arch"
+            mkdir -p "$out"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -o "$out/tailscaled$ext" ./cmd/tailscaled
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -o "$out/tailscale$ext" ./cmd/tailscale
+            "$out/tailscaled$ext" --version || true
+          done
+
+      - name: Package per-platform tailscale archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/tsbuild"
+          pkg="$RUNNER_TEMP/ts-packages"
+          mkdir -p "$pkg"
+
+          # Windows archive carries wintun.dll: tailscaled needs it beside the
+          # executable for kernel-mode TUN.
+          if [[ -z "$WINTUN_SHA256" ]]; then
+            echo "WINTUN_SHA256 is empty; download" >&2
+            echo "https://www.wintun.net/builds/wintun-${WINTUN_VERSION}.zip" >&2
+            echo "hash it and record the value in the workflow env before publishing." >&2
+            exit 1
+          fi
+          curl --fail --location --retry 3 \
+            --output "$out/wintun.zip" \
+            "https://www.wintun.net/builds/wintun-${WINTUN_VERSION}.zip"
+          echo "${WINTUN_SHA256}  $out/wintun.zip" | sha256sum --check --strict
+          unzip -q "$out/wintun.zip" -d "$out/wintun"
+          cp "$out/wintun/wintun/bin/amd64/wintun.dll" "$out/windows-amd64/wintun.dll"
+
+          winzip="tailscale-windows-amd64-${TAILSCALE_VERSION}.zip"
+          (cd "$out/windows-amd64" && zip -q -r "$pkg/$winzip" tailscaled.exe tailscale.exe wintun.dll)
+          lintar="tailscale-linux-amd64-${TAILSCALE_VERSION}.tar.gz"
+          tar -C "$out/linux-amd64" -czf "$pkg/$lintar" tailscaled tailscale
+          darzip="tailscale-darwin-amd64-${TAILSCALE_VERSION}.zip"
+          (cd "$out/darwin-amd64" && zip -q -r "$pkg/$darzip" tailscaled tailscale)
+
+          (cd "$pkg" && sha256sum --binary ./*.zip ./*.tar.gz > SHA256SUMS)
+          mkdir -p "$RUNNER_TEMP/ts-unpacked"
+          cp "$out/windows-amd64/tailscaled.exe" \
+             "$out/windows-amd64/tailscale.exe" \
+             "$out/windows-amd64/wintun.dll" \
+             "$RUNNER_TEMP/ts-unpacked/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Tailscale-component-archives
+          path: |
+            ${{ runner.temp }}/ts-packages/*
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Tailscale-windows-unpacked
+          path: |
+            ${{ runner.temp }}/ts-unpacked/*
+          if-no-files-found: error
+
   linux:
     runs-on: ubuntu-latest
+    needs: [tailscale-components]
 
     steps:
       - uses: actions/checkout@v4
@@ -73,16 +183,17 @@ jobs:
           go build -trimpath -ldflags "-s -w -X main.version=$MESHMUX_VERSION" -o "$bundle/meshmux" ./cmd/meshmux
           go build -trimpath -ldflags "-s -w -X main.version=$MESHMUX_VERSION" -o "$bundle/meshmux-tray" ./cmd/meshmux-tray
 
-          core_source="mihomo-source-${MIHOMO_CORE_VERSION}.zip"
-          curl --fail --location --retry 3 \
-            --output "$components/$core_source" \
-            "https://github.com/lumokato/MeshMux/releases/download/mihomo-${MIHOMO_CORE_VERSION}/${core_source}"
-          echo "${MIHOMO_SOURCE_SHA256}  $components/$core_source" | sha256sum --check --strict
-          core_binary="mihomo-linux-amd64-compatible-${MIHOMO_CORE_VERSION}.gz"
+          if [[ -z "$MIHOMO_UPSTREAM_LINUX_SHA256" ]]; then
+            echo "MIHOMO_UPSTREAM_LINUX_SHA256 is empty; download" >&2
+            echo "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_UPSTREAM_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_UPSTREAM_VERSION}.gz" >&2
+            echo "hash it and record the value in the workflow env before publishing." >&2
+            exit 1
+          fi
+          core_binary="mihomo-linux-amd64-compatible-${MIHOMO_UPSTREAM_VERSION}.gz"
           curl --fail --location --retry 3 \
             --output "$components/$core_binary" \
-            "https://github.com/lumokato/MeshMux/releases/download/mihomo-${MIHOMO_CORE_VERSION}/$core_binary"
-          echo "${MIHOMO_LINUX_SHA256}  $components/$core_binary" | sha256sum --check --strict
+            "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_UPSTREAM_VERSION}/$core_binary"
+          echo "${MIHOMO_UPSTREAM_LINUX_SHA256}  $components/$core_binary" | sha256sum --check --strict
           gzip -dc "$components/$core_binary" > "$bundle/bin/mihomo"
           chmod 755 "$bundle/bin/mihomo"
           "$bundle/bin/mihomo" -v
@@ -116,6 +227,7 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    needs: [tailscale-components]
 
     steps:
       - uses: actions/checkout@v4
@@ -150,27 +262,36 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Go vet failed" }
           if (Test-Path -LiteralPath build) { throw "build must be absent; archive prior outputs first" }
           if (Test-Path -LiteralPath release) { throw "release must be absent; archive prior outputs first" }
-          New-Item -ItemType Directory -Force -Path build | Out-Null
+          New-Item -ItemType Directory -Force -Path build\bin | Out-Null
           go build -ldflags "-H=windowsgui -s -w -X main.version=$env:MESHMUX_VERSION" -o build\MeshMux.exe .\cmd\meshmux-tray
           if ($LASTEXITCODE -ne 0) { throw "Tray build failed" }
           go build -ldflags "-s -w -X main.version=$env:MESHMUX_VERSION" -o build\meshmux-cli.exe .\cmd\meshmux
           if ($LASTEXITCODE -ne 0) { throw "CLI build failed" }
+
+      - name: Download tailscale components
+        uses: actions/download-artifact@v4
+        with:
+          name: Tailscale-windows-unpacked
+          path: build\bin
 
       - name: Prepare bundled components
         shell: pwsh
         run: |
           $repo = (Get-Location).Path
           $components = Join-Path $env:RUNNER_TEMP ("meshmux-components-" + [guid]::NewGuid().ToString("N"))
-          New-Item -ItemType Directory -Force -Path build\bin,$components,(Join-Path $components "downloads") | Out-Null
+          New-Item -ItemType Directory -Force -Path $components,(Join-Path $components "downloads") | Out-Null
 
+          if (-not $env:MIHOMO_UPSTREAM_WINDOWS_SHA256) {
+            throw "MIHOMO_UPSTREAM_WINDOWS_SHA256 is empty; download https://github.com/MetaCubeX/mihomo/releases/download/$env:MIHOMO_UPSTREAM_VERSION/mihomo-windows-amd64-compatible-$env:MIHOMO_UPSTREAM_VERSION.zip, hash it and record the value in the workflow env before publishing."
+          }
           Push-Location $components
-          $mihomoArchive = "mihomo-windows-amd64-compatible-$env:MIHOMO_CORE_VERSION.zip"
+          $mihomoArchive = "mihomo-windows-amd64-compatible-$env:MIHOMO_UPSTREAM_VERSION.zip"
           Invoke-WebRequest `
-            -Uri "https://github.com/lumokato/MeshMux/releases/download/mihomo-$env:MIHOMO_CORE_VERSION/$mihomoArchive" `
+            -Uri "https://github.com/MetaCubeX/mihomo/releases/download/$env:MIHOMO_UPSTREAM_VERSION/$mihomoArchive" `
             -OutFile $mihomoArchive `
             -UseBasicParsing
           $mihomoHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mihomoArchive).Hash
-          if ($mihomoHash -ne $env:MIHOMO_CORE_SHA256) {
+          if ($mihomoHash -ne $env:MIHOMO_UPSTREAM_WINDOWS_SHA256) {
             throw "Mihomo core checksum mismatch: $mihomoHash"
           }
           Expand-Archive -LiteralPath $mihomoArchive -DestinationPath mihomo -Force
@@ -224,7 +345,7 @@ jobs:
     permissions:
       contents: write
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [linux, windows]
+    needs: [tailscale-components, linux, windows]
     runs-on: ubuntu-latest
 
     steps:
@@ -232,7 +353,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          pattern: MeshMux-*
+          pattern: "{MeshMux-*,Tailscale-*}"
           path: release-assets
           merge-multiple: true
 
