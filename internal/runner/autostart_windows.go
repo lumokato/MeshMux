@@ -1,28 +1,17 @@
+//go:build windows
+
 package runner
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/meshmux/meshmux/internal/winservice"
 )
 
-func Proxy(mode string, port int) error {
-	if runtime.GOOS != "windows" {
-		return fmt.Errorf("system proxy is only implemented on Windows")
-	}
-	return platformProxy(mode, port)
-}
-
-func ProxyEnabled() bool { return platformProxyEnabled() }
-
 func Autostart(mode string) error {
-	if runtime.GOOS != "windows" {
-		return fmt.Errorf("autostart is only implemented on Windows")
-	}
 	key := `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
 	if winservice.Installed() {
 		switch mode {
@@ -56,9 +45,6 @@ func Autostart(mode string) error {
 }
 
 func AutostartEnabled() bool {
-	if runtime.GOOS != "windows" {
-		return false
-	}
 	if winservice.Installed() {
 		return true
 	}

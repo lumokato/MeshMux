@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -132,7 +131,7 @@ func sameExecutablePath(a, b string) bool {
 	}
 	a = clean(a)
 	b = clean(b)
-	if runtime.GOOS == "windows" {
+	if caseInsensitivePaths() {
 		return strings.EqualFold(a, b)
 	}
 	return a == b
@@ -141,7 +140,7 @@ func sameExecutablePath(a, b string) bool {
 func discoveryPorts(cfg *config.Config) []int {
 	var ports []int
 	if cfg != nil {
-		if port := controllerPort(cfg.Ports.Controller); port > 0 {
+		if port := portFromAddress(cfg.Ports.Controller); port > 0 {
 			ports = append(ports, port)
 		}
 		if cfg.Ports.Mixed > 0 && !containsPort(ports, cfg.Ports.Mixed) {
@@ -151,7 +150,9 @@ func discoveryPorts(cfg *config.Config) []int {
 	return ports
 }
 
-func controllerPort(address string) int {
+// portFromAddress extracts the numeric port from a listen or dial address.
+// It accepts "127.0.0.1:2080", "*:2080" and "[::1]:2080" forms.
+func portFromAddress(address string) int {
 	address = strings.TrimSpace(address)
 	if address == "" {
 		return 0
