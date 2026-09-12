@@ -254,8 +254,8 @@ func Render(cfg *config.Config, target config.Target) (string, error) {
 
 	renderTUN(&b, cfg, target)
 	renderDNS(&b, cfg, target)
-	renderProxies(&b, cfg, target, wgConfigs, providerProxyLines)
-	renderGroups(&b, providerProxyNames, wgNames, cfg.Tailscale.Enabled, cfg.Setup.AllowDirectOnly)
+	renderProxies(&b, cfg, wgConfigs, providerProxyLines)
+	renderGroups(&b, providerProxyNames, wgNames, cfg.Setup.AllowDirectOnly)
 	renderRules(&b, cfg, wgConfigs)
 
 	return strings.TrimRight(b.String(), "\n") + "\n", nil
@@ -355,8 +355,10 @@ func renderDNS(b *strings.Builder, cfg *config.Config, target config.Target) {
 	linef(b, "dns:")
 	linef(b, "  enable: true")
 	if !isMobileTarget(target) {
+		// Linux and macOS resolve through their own local setup, so the DNS
+		// listener stays on the loopback interface rather than every adapter.
 		listenAddress := "0.0.0.0:1053"
-		if target.Type == "linux-mihomo" {
+		if target.Type == "linux-mihomo" || target.Type == "darwin-mihomo" {
 			listenAddress = "127.0.0.1:1053"
 		}
 		linef(b, "  listen: %s", listenAddress)
@@ -386,9 +388,9 @@ func renderDNS(b *strings.Builder, cfg *config.Config, target config.Target) {
 	linef(b, "")
 }
 
-func renderProxies(b *strings.Builder, cfg *config.Config, target config.Target, wgConfigs []wgConfig, providerProxyLines []string) {
+func renderProxies(b *strings.Builder, cfg *config.Config, wgConfigs []wgConfig, providerProxyLines []string) {
 	linef(b, "proxies:")
-	if len(providerProxyLines) == 0 && len(wgConfigs) == 0 && !cfg.Tailscale.Enabled {
+	if len(providerProxyLines) == 0 && len(wgConfigs) == 0 {
 		linef(b, "  []")
 		linef(b, "")
 		return
@@ -398,9 +400,6 @@ func renderProxies(b *strings.Builder, cfg *config.Config, target config.Target,
 	}
 	for _, wg := range wgConfigs {
 		renderWGProxy(b, cfg, wg)
-	}
-	if cfg.Tailscale.Enabled {
-		renderTSProxy(b, cfg, target)
 	}
 	linef(b, "")
 }
@@ -442,47 +441,7 @@ func renderWGProxy(b *strings.Builder, cfg *config.Config, wg wgConfig) {
 	linef(b, "")
 }
 
-func renderTSProxy(b *strings.Builder, cfg *config.Config, target config.Target) {
-	name := "Tailnet"
-	linef(b, "  - name: %s", quote(name))
-	linef(b, "    type: tailscale")
-	if target.Hostname != "" {
-		linef(b, "    hostname: %s", quote(target.Hostname))
-	}
-	if cfg.Tailscale.AuthKey != "" {
-		linef(b, "    auth-key: %s", quote(cfg.Tailscale.AuthKey))
-	}
-	if cfg.Tailscale.AuthKeyFile != "" {
-		if data, err := os.ReadFile(cfg.Tailscale.AuthKeyFile); err == nil {
-			key := strings.TrimSpace(string(data))
-			if key != "" {
-				linef(b, "    auth-key: %s", quote(key))
-			}
-		}
-	}
-	if cfg.Tailscale.ControlURL != "" {
-		linef(b, "    control-url: %s", quote(cfg.Tailscale.ControlURL))
-	}
-	linef(b, "    state-dir: %s", quote(tailscaleStateDir(target)))
-	linef(b, "    ephemeral: %t", cfg.Tailscale.Ephemeral)
-	linef(b, "    udp: true")
-	linef(b, "    accept-routes: %t", cfg.Tailscale.AcceptRoutes)
-	if cfg.Tailscale.ExitNode != "" {
-		linef(b, "    exit-node: %s", quote(cfg.Tailscale.ExitNode))
-	}
-	linef(b, "    exit-node-allow-lan-access: %t", cfg.Tailscale.ExitNodeAllowLANAccess)
-	if !isMobileTarget(target) && len(cfg.Tailscale.InboundForwards) > 0 {
-		linef(b, "    inbound-forwards:")
-		for _, forward := range cfg.Tailscale.InboundForwards {
-			linef(b, "      - name: %s", quote(forward.Name))
-			linef(b, "        network: %s", forward.Network)
-			linef(b, "        listen-port: %d", forward.ListenPort)
-			linef(b, "        target: %s", quote(forward.Target))
-		}
-	}
-}
-
-func renderGroups(b *strings.Builder, providers, wgNames []string, tailscale, directOnly bool) {
+func renderGroups(b *strings.Builder, providers, wgNames []string, directOnly bool) {
 	linef(b, "proxy-groups:")
 	linef(b, "  - name: PROXY")
 	linef(b, "    type: select")
@@ -502,16 +461,9 @@ func renderGroups(b *strings.Builder, providers, wgNames []string, tailscale, di
 	} else {
 		linef(b, "    proxies: %s", inlineList(append(wgNames, "DIRECT")))
 	}
-	linef(b, "  - name: TS")
-	linef(b, "    type: select")
-	if tailscale {
-		linef(b, "    proxies: ['Tailnet', 'DIRECT']")
-	} else {
-		linef(b, "    proxies: ['DIRECT']")
-	}
 	linef(b, "  - name: GLOBAL")
 	linef(b, "    type: select")
-	linef(b, "    proxies: ['PROXY', 'DIRECT', 'WG', 'TS']")
+	linef(b, "    proxies: ['PROXY', 'DIRECT', 'WG']")
 	linef(b, "")
 }
 
@@ -528,20 +480,6 @@ func renderRules(b *strings.Builder, cfg *config.Config, wgConfigs []wgConfig) {
 	}
 	for _, domain := range cfg.WireGuard.Domains {
 		domainRule(b, domain, "WG")
-	}
-	if cfg.Tailscale.Enabled {
-		if cfg.Tailscale.MagicDNSSuffix != "" {
-			linef(b, "  - DOMAIN-SUFFIX,%s,TS", cfg.Tailscale.MagicDNSSuffix)
-		}
-		for _, domain := range cfg.Tailscale.Domains {
-			domainRule(b, domain, "TS")
-		}
-		for _, cidr := range cfg.Tailscale.Routes {
-			linef(b, "  - IP-CIDR,%s,TS,no-resolve", cidr)
-		}
-		for _, cidr := range cfg.Tailscale.IPv6Routes {
-			linef(b, "  - IP-CIDR6,%s,TS,no-resolve", cidr)
-		}
 	}
 	for _, cidr := range cfg.Rules.DirectCIDRs {
 		linef(b, "  - IP-CIDR,%s,DIRECT,no-resolve", cidr)
@@ -578,15 +516,6 @@ func domainRule(b *strings.Builder, domain, target string) {
 		return
 	}
 	linef(b, "  - DOMAIN,%s,%s", domain, target)
-}
-
-func tailscaleStateDir(target config.Target) string {
-	switch target.Type {
-	case "android-flclash", "android-yumebox", "mobile-mihomo":
-		return "tailscale"
-	default:
-		return "./state/tailscale"
-	}
 }
 
 func isMobileTarget(target config.Target) bool {

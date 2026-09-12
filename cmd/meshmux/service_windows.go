@@ -38,11 +38,6 @@ func runWindowsService(args []string) error {
 	if err := os.Chdir(home); err != nil {
 		return err
 	}
-	if cfg, _, err := load(configArgs(configPath)); err == nil && tailnetNeedsForcedLogin(cfg, home) {
-		if err := os.Setenv("TSNET_FORCE_LOGIN", "1"); err != nil {
-			return err
-		}
-	}
 	return svc.Run(winservice.Name, &serviceHandler{configPath: configPath})
 }
 
@@ -741,34 +736,6 @@ func rejectBootstrapRegression(sourcePath, currentPath string) error {
 		return nil
 	}
 	return errors.New("拒绝用安装器空模板覆盖现有 MeshMux 服务配置；请恢复 LocalAppData 中的真实配置后重试")
-}
-
-func tailnetNeedsForcedLogin(cfg *config.Config, home string) bool {
-	if cfg == nil || !cfg.Tailscale.Enabled {
-		return false
-	}
-	if strings.TrimSpace(cfg.Tailscale.AuthKey) == "" && strings.TrimSpace(cfg.Tailscale.AuthKeyFile) == "" {
-		return false
-	}
-	return !validTailnetState(filepath.Join(home, "state", "tailscale"))
-}
-
-func validTailnetState(dir string) bool {
-	data, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
-	if err != nil || len(data) == 0 {
-		return false
-	}
-	var state map[string]json.RawMessage
-	if json.Unmarshal(data, &state) != nil {
-		return false
-	}
-	for _, key := range []string{"_machinekey", "_current-profile", "_profiles"} {
-		value, ok := state[key]
-		if !ok || len(value) == 0 || string(value) == `""` || string(value) == "null" {
-			return false
-		}
-	}
-	return true
 }
 
 func writeSnapshotFile(path string, data []byte) error {

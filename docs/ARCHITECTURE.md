@@ -16,7 +16,7 @@
 
 CLI/tray -> config -> generator -> runner -> mihomo. Web actions call the same packages. Windows SCM runs the CLI supervisor, not the tray.
 
-Windows SCM service readiness means the MeshMux supervisor is available. Mihomo process creation, TUN adapter state, Tailnet login, controller reachability and proxy-node health are separate runtime states. The service stays manageable and retries the core after a core failure; it must not exit or roll back installation merely because a network component is slow or unavailable. New configurations default to TUN with automatic routing, while an existing explicit TUN disable remains unchanged.
+Windows SCM service readiness means the MeshMux supervisor is available. Mihomo process creation, TUN adapter state, controller reachability and proxy-node health are separate runtime states. The service stays manageable and retries the core after a core failure; it must not exit or roll back installation merely because a network component is slow or unavailable. New configurations default to TUN with automatic routing, while an existing explicit TUN disable remains unchanged.
 
 ## State and compatibility
 
@@ -48,8 +48,8 @@ Full Windows/Linux tests, vet, module verification and manager builds passed, in
 
 - Cross-process file locks now serialize core transitions/downloads, profile generation, Web writes and service management within their respective data roots. Locks are released by the OS on process exit. They do not provide a global transaction across different data roots or arbitrary third-party writers. Cancellation targets the supervisor-owned PID, not a replacement core.
 - Service restart now stops the old service before snapshot writes, and rollback captures existing provider/WireGuard files plus incoming relative references. Preparation failure and new-asset removal have regression tests. Rollback is in-process, not a durable crash-recovery journal; power loss during multi-file activation remains an acceptance/design boundary.
-- Tailnet health uses controller/log/cache evidence, not end-to-end SSH or RDP proof.
-- Downloads require an explicit component SHA-256 or a GitHub asset SHA-256 digest. Missing or mismatched checksums fail before installation. The default core selector may follow the newest matching MeshMux core asset, but a release must still select and record one tested core/source pair; changing the core repository alone must not silently remove MeshMux-specific features.
+- Tailnet membership and inbound access are the official Tailscale client's responsibility; MeshMux no longer embeds a tsnet node and does not report its health.
+- Downloads require an explicit component SHA-256 or a GitHub asset SHA-256 digest. Missing or mismatched checksums fail before installation. The default core selector follows the newest matching upstream asset for the platform; fork-era selections migrate to upstream unless explicitly pinned by a SHA-256 or a custom asset pattern.
 - Downloads are capped at 512 MiB, extracted payloads at 1 GiB and archive entries at 20,000. Limit and malicious-archive tests pass.
 - Service, service-command and tray diagnostics now use the shared sanitized rotating writer, 2 MiB per file and two backups, with cross-process append locking.
 - The service-owned Windows core is kept under protected `ProgramData\\MeshMux\\bin\\mihomo.exe`. Installer registration initializes it only when absent; explicit core updates replace it while the service is stopped and report a restart failure without silently restoring or retrying an older core. Installer upgrades do not silently downgrade the service-owned core.

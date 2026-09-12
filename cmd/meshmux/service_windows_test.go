@@ -528,31 +528,6 @@ func TestStartWindowsServiceDoesNotStopRunningService(t *testing.T) {
 	}
 }
 
-func TestTailnetNeedsForcedLoginOnlyWithoutValidState(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Tailscale.Enabled = true
-	cfg.Tailscale.AuthKey = "test-key"
-	home := t.TempDir()
-	if !tailnetNeedsForcedLogin(cfg, home) {
-		t.Fatal("missing state did not request forced login")
-	}
-	writeValidTailnetState(t, filepath.Join(home, "state", "tailscale"))
-	if tailnetNeedsForcedLogin(cfg, home) {
-		t.Fatal("valid state requested forced login")
-	}
-}
-
-func writeValidTailnetState(t *testing.T, dir string) {
-	t.Helper()
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	data := []byte(`{"_machinekey":"machine","_current-profile":"current","_profiles":"profiles"}`)
-	if err := os.WriteFile(filepath.Join(dir, "tailscaled.state"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestActivateWindowsServiceDoesNotStopUserCoreWhenServiceStopFails(t *testing.T) {
 	home := t.TempDir()
 	restoreWorkingDir(t)

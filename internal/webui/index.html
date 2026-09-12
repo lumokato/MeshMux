@@ -93,13 +93,8 @@
             <label>后端名
               <input id="subStoreBackend" placeholder="backend">
             </label>
-            <label>Tailnet Auth Key
-              <input id="tsAuthKey" type="password" placeholder="可选，启用 Tailnet 时填写">
-              <span>启用 Tailnet 时填写；不填则只生成普通代理配置。</span>
-            </label>
           </div>
           <label class="switch"><input id="allowDirectOnly" type="checkbox">仅直连模式（不使用日常代理订阅）</label>
-          <label class="switch"><input id="tsEnabled" type="checkbox">启用 Tailnet 出站</label>
           <div class="actions">
             <button class="primary" onclick="saveQuick()">保存</button>
             <button onclick="saveThen('probe-substore')">验证 Sub-Store</button>
@@ -143,14 +138,7 @@
           <div class="grid">
             <label>混合代理端口<input id="mixedPort" type="number" min="1" max="65535"></label>
             <label>控制器地址<input id="controller"></label>
-            <label>MagicDNS 后缀<input id="tsMagic" placeholder="tailnet.ts.net"></label>
-            <label>Tailnet 域名规则<input id="tsDomains" placeholder="*.ts.net, *.example.ts.net"></label>
           </div>
-        </div>
-        <div class="panel">
-          <h2>Tailnet 入站转发</h2>
-          <div class="hint">只监听 MeshMux 内嵌 tsnet 节点的 Tailnet 地址，不绑定{{INBOUND_SCOPE}}。每行格式：名称,协议,监听端口,目标地址。</div>
-          <textarea id="tsInboundForwards" spellcheck="false" placeholder="{{INBOUND_PLACEHOLDER}}&#10;example-udp,udp,12345,127.0.0.1:12345"></textarea>
         </div>
         <div class="panel">
           <h2>配置 JSON</h2>
@@ -195,8 +183,7 @@
     function info(text){ const s=el('status'); s.className='status'; s.textContent=text; }
     function ensure(c){
       c.name ||= 'default'; c.setup ||= {}; c.ports ||= {}; c.paths ||= {}; c.providers ||= [];
-      c.tun ||= {}; c.dns ||= {}; c.rules ||= {}; c.tailscale ||= {}; c.wireguard ||= {};
-      c.tailscale.inboundForwards ||= [];
+      c.tun ||= {}; c.dns ||= {}; c.rules ||= {}; c.wireguard ||= {};
       c.wireguard.configs ||= [];
       c.components ||= {}; c.components.mihomo ||= {}; c.components.dashboard ||= {};
       c.targets ||= []; c.publish ||= []; return c;
@@ -232,15 +219,10 @@
       el('allowDirectOnly').checked = !!cfg.setup.allowDirectOnly;
       setVal('subStoreUrl', cfg.setup.subStoreUrl || '');
       setVal('subStoreBackend', cfg.setup.subStoreBackend || '');
-      el('tsEnabled').checked = !!cfg.tailscale.enabled;
-      setVal('tsAuthKey', cfg.tailscale.authKey || '');
       mode = cfg.tun.enabled ? 'tun' : 'proxy';
       setMode(mode);
       setVal('mixedPort', cfg.ports.mixed || 2080);
       setVal('controller', cfg.ports.controller || '127.0.0.1:9090');
-      setVal('tsMagic', cfg.tailscale.magicDnsSuffix || '');
-      setVal('tsDomains', (cfg.tailscale.domains || ['*.ts.net']).join(', '));
-      setVal('tsInboundForwards', (cfg.tailscale.inboundForwards || []).map(f => [f.name, f.network, f.listenPort, f.target].join(',')).join('\n'));
       refreshWireGuardSummary();
       el('advancedJson').value = JSON.stringify(storageConfig(cfg), null, 2);
     }
@@ -259,20 +241,6 @@
         {name:'mobile', type:'mobile-mihomo', hostname:'mobile-meshmux', output:'profiles/mobile.yaml'}
       ];
       cfg.publish = [{name:'mobile-substore', type:'substore-files', input:'profiles/mobile.yaml', baseUrl:cfg.setup.subStoreUrl, backend:cfg.setup.subStoreBackend, fileName:cfg.setup.subStoreFileName || '', tokenEnv:'MESHMUX_SUBSTORE_TOKEN'}];
-      cfg.tailscale.enabled = el('tsEnabled').checked;
-      cfg.tailscale.controlUrl ||= 'https://controlplane.tailscale.com';
-      cfg.tailscale.authKey = val('tsAuthKey');
-      cfg.tailscale.acceptRoutes = true;
-      cfg.tailscale.routes = cfg.tailscale.routes?.length ? cfg.tailscale.routes : ['100.64.0.0/10'];
-      cfg.tailscale.ipv6Routes = cfg.tailscale.ipv6Routes?.length ? cfg.tailscale.ipv6Routes : ['fd7a:115c:a1e0::/48'];
-      cfg.tailscale.magicDnsSuffix = val('tsMagic');
-      cfg.tailscale.domains = val('tsDomains').split(',').map(s => s.trim()).filter(Boolean);
-      cfg.tailscale.inboundForwards = val('tsInboundForwards').split(/\r?\n/).map((line, index) => {
-        if (!line.trim()) return null;
-        const parts = line.split(',').map(s => s.trim());
-        if (parts.length !== 4) throw new Error('Tailnet 入站转发第 ' + (index + 1) + ' 行格式错误');
-        return {name:parts[0], network:parts[1].toLowerCase(), listenPort:Number(parts[2]), target:parts[3]};
-      }).filter(Boolean);
       cfg.tun.enabled = mode === 'tun';
       cfg.tun.stack = 'mixed';
       cfg.tun.autoRoute = mode === 'tun';

@@ -341,10 +341,7 @@ func configArgs(path string) []string {
 }
 
 func defaultRuntimeTarget() string {
-	if runtime.GOOS == "linux" {
-		return "linux"
-	}
-	return "windows"
+	return config.DefaultTargetNameFor(runtime.GOOS)
 }
 
 func load(args []string) (*config.Config, string, error) {
@@ -383,11 +380,6 @@ func checkConfig(args []string, output io.Writer) error {
 		}
 	}
 
-	authConfigured := strings.TrimSpace(cfg.Tailscale.AuthKey) != ""
-	if !authConfigured && strings.TrimSpace(cfg.Tailscale.AuthKeyFile) != "" {
-		authConfigured = fileHasContent(cfg.Tailscale.AuthKeyFile)
-	}
-
 	wireGuardAvailable := 0
 	for _, path := range cfg.WireGuard.Configs {
 		if fileHasContent(path) {
@@ -396,25 +388,18 @@ func checkConfig(args []string, output io.Writer) error {
 	}
 
 	dailyProxyOK := cfg.Setup.AllowDirectOnly || providerConfigured || providerCacheAvailable
-	tailnetAuthOK := !cfg.Tailscale.Enabled || authConfigured
 	wireGuardOK := wireGuardAvailable == len(cfg.WireGuard.Configs)
 
 	fmt.Fprintln(output, "config: valid")
 	fmt.Fprintf(output, "config-path: %s\n", path)
 	fmt.Fprintf(output, "daily-proxy-source: %s\n", configured(providerConfigured))
 	fmt.Fprintf(output, "daily-proxy-cache: %s\n", configured(providerCacheAvailable))
-	fmt.Fprintf(output, "tailnet: %s\n", enabled(cfg.Tailscale.Enabled))
-	fmt.Fprintf(output, "tailnet-auth: %s\n", configured(authConfigured))
 	fmt.Fprintf(output, "wireguard-configs: %d/%d available\n", wireGuardAvailable, len(cfg.WireGuard.Configs))
-	fmt.Fprintf(output, "tailnet-inbound-forwards: %d\n", len(cfg.Tailscale.InboundForwards))
 	fmt.Fprintf(output, "direct-only: %s\n", enabled(cfg.Setup.AllowDirectOnly))
 
 	var problems []string
 	if !dailyProxyOK {
 		problems = append(problems, "daily proxy source and cache are both missing")
-	}
-	if !tailnetAuthOK {
-		problems = append(problems, "Tailnet is enabled but no auth key is configured")
 	}
 	if !wireGuardOK {
 		problems = append(problems, "one or more WireGuard config files are missing or empty")

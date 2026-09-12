@@ -6,7 +6,7 @@
 
 Use the current application checkout, not extracted installers or old build directories. cmd/, internal/, templates/ and assets/ are application source; .github/workflows/release.yml and installer/MeshMux.iss define packaging. packaging/linux/ owns Linux deployment examples.
 
-The separate Mihomo checkout is maintained source, not obsolete output. A release selects one explicit core build and records its source, platform assets and SHA-256 values together. Version strings alone do not establish provenance, and a newer upstream version must not be adopted until required MeshMux-specific features are present and tested.
+The manager consumes upstream MetaCubeX/mihomo release assets directly. A release records the selected core version and its SHA-256 values together; version strings alone do not establish provenance.
 
 Do not execute MeshMux.exe for a version query: it launches the tray. Use the exact meshmux-cli.exe path and its version command. Installed paths, process ownership and hashes are runtime evidence; a README or old installer is not.
 
@@ -20,7 +20,7 @@ go vet ./...
 go mod verify
 ~~~
 
-The manager supports Go 1.22. Windows ordinary CLI/tray builds do not require a C compiler. Race testing requires CGO and a supported C compiler. The Linux GTK tray also requires GCC, GTK3 and Ayatana AppIndicator development packages. Build the separate Mihomo core with Go 1.26.4 and with_gvisor, CGO_ENABLED=0, GOAMD64=v1; do not apply the manager's Go baseline to the core dependencies.
+The manager supports Go 1.22. Windows ordinary CLI/tray builds do not require a C compiler. Race testing requires CGO and a supported C compiler. The Linux GTK tray also requires GCC, GTK3 and Ayatana AppIndicator development packages. The macOS CLI cross-compiles with CGO disabled; the macOS tray requires CGO (Xcode Command Line Tools) and must be built on macOS.
 
 scripts/test-linux.sh runs full/race tests, vet and CLI/tray builds as an unprivileged user in /tmp/meshmux-verify-*/src. Use isolated HOME, caches and MESHMUX_HOME, without a display or session bus. The script never starts a tray, core or installed service. Linux race covers shared/Linux code, not Windows-specific code.
 
@@ -41,7 +41,7 @@ The default is preview. Apply accepts only the exact build/ and release/ childre
 
 A source edit is not a deployment. Choose an explicit version, pass both platform workflows, inspect asset hashes and publish only that source/core pair. Installer compilation requires MESHMUX_VERSION; CI refuses stale output directories and checks native command exits. Release versions must be numeric major.minor.patch values.
 
-The workflow selects and hashes core binaries, corresponding source, dashboard version/hash and the GeoIP content hash. Mutable upstream data may later make a rebuild fail its checksum; refresh the selected version and hashes deliberately, never silently accept different bytes. Application downloads require an explicit SHA-256 or a GitHub asset SHA-256 digest. Older custom assets may need an explicit pin. Limits: 512 MiB download, 1 GiB expanded, 20,000 entries.
+The workflow selects and hashes core binaries, the dashboard version/hash and the GeoIP content hash. Mutable upstream data may later make a rebuild fail its checksum; refresh the selected version and hashes deliberately, never silently accept different bytes. Application downloads require an explicit SHA-256 or a GitHub asset SHA-256 digest. Older custom assets may need an explicit pin. Limits: 512 MiB download, 1 GiB expanded, 20,000 entries.
 
 ## Acceptance boundaries
 

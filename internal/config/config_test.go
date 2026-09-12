@@ -37,8 +37,8 @@ func TestEnsureLocalConfigMigratesRealLegacyOverBootstrapTemplate(t *testing.T) 
 	local := filepath.Join(root, "Local", AppName)
 	legacy := filepath.Join(root, "Roaming", AppName)
 	example := filepath.Join(root, "meshmux.example.json")
-	template := []byte(`{"name":"default","setup":{"providerUrl":""},"tailscale":{"enabled":false}}`)
-	real := []byte(`{"name":"real","setup":{"providerUrl":"https://secret.invalid/sub"},"tailscale":{"enabled":true,"authKey":"secret"}}`)
+	template := []byte(`{"name":"default","setup":{"providerUrl":""}}`)
+	real := []byte(`{"name":"real","setup":{"providerUrl":"https://secret.invalid/sub"}}`)
 	writeTestFile(t, example, template)
 	writeTestFile(t, filepath.Join(local, DefaultConfigPath), template)
 	writeTestFile(t, filepath.Join(legacy, DefaultConfigPath), real)
@@ -110,7 +110,7 @@ func TestEnsureCanonicalConfigRecoversServiceSnapshot(t *testing.T) {
 	example := filepath.Join(root, "meshmux.example.json")
 	serviceSnapshot := filepath.Join(root, "ProgramData", AppName, DefaultConfigPath)
 	template := []byte(`{"name":"default","setup":{"providerUrl":""}}`)
-	real := []byte(`{"name":"service-copy","setup":{"providerUrl":"https://secret.invalid/sub"},"tailscale":{"enabled":true,"authKey":"secret"}}`)
+	real := []byte(`{"name":"service-copy","setup":{"providerUrl":"https://secret.invalid/sub"}}`)
 	writeTestFile(t, example, template)
 	writeTestFile(t, filepath.Join(local, DefaultConfigPath), template)
 	writeTestFile(t, serviceSnapshot, real)
@@ -129,7 +129,7 @@ func TestEnsureCanonicalConfigRecoversServiceSnapshot(t *testing.T) {
 }
 
 func TestBootstrapClassifierPreservesExplicitAndConfiguredModes(t *testing.T) {
-	bootstrap := []byte(`{"name":"default","setup":{"providerUrl":""},"tailscale":{"enabled":false}}`)
+	bootstrap := []byte(`{"name":"default","setup":{"providerUrl":""}}`)
 	if !IsBootstrapConfig(bootstrap) {
 		t.Fatal("legacy bootstrap template was not recognized")
 	}
@@ -137,8 +137,6 @@ func TestBootstrapClassifierPreservesExplicitAndConfiguredModes(t *testing.T) {
 		[]byte(`{"setup":{"allowDirectOnly":true}}`),
 		[]byte(`{"setup":{"providerUrl":"https://secret.invalid/sub"}}`),
 		[]byte(`{"wireguard":{"configs":["wireguard/a.conf"]}}`),
-		[]byte(`{"tailscale":{"enabled":true,"authKey":"secret"}}`),
-		[]byte(`{"tailscale":{"enabled":true,"inboundForwards":[{"name":"ssh","network":"tcp","listenPort":22,"target":"127.0.0.1:22"}]}}`),
 	} {
 		if IsBootstrapConfig(configured) {
 			t.Fatalf("configured mode classified as bootstrap: %s", configured)
@@ -222,41 +220,6 @@ func TestStorageCopyOmitsDerivedRuntimeFields(t *testing.T) {
 	}
 	if !strings.Contains(text, `"providerUrl"`) || !strings.Contains(text, `"subStoreFileName"`) {
 		t.Fatalf("stored config lost setup fields: %s", text)
-	}
-}
-
-func TestValidateTailscaleInboundForwards(t *testing.T) {
-	cfg := Config{Tailscale: Tailscale{
-		Enabled: true,
-		InboundForwards: []InboundForward{
-			{Name: " ssh ", Network: "TCP", ListenPort: 22, Target: "127.0.0.1:22"},
-			{Name: "udp", Network: "udp", ListenPort: 12345, Target: "[::1]:12345"},
-		},
-	}}
-	if err := cfg.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Tailscale.InboundForwards[0].Name != "ssh" || cfg.Tailscale.InboundForwards[0].Network != "tcp" {
-		t.Fatalf("forwards not normalized: %+v", cfg.Tailscale.InboundForwards)
-	}
-}
-
-func TestValidateTailscaleInboundForwardsRejectsInvalidConfig(t *testing.T) {
-	testCases := []struct {
-		name string
-		cfg  Config
-		want string
-	}{
-		{name: "disabled", cfg: Config{Tailscale: Tailscale{InboundForwards: []InboundForward{{Name: "ssh", Network: "tcp", ListenPort: 22, Target: "127.0.0.1:22"}}}}, want: "要求先启用"},
-		{name: "duplicate", cfg: Config{Tailscale: Tailscale{Enabled: true, InboundForwards: []InboundForward{{Name: "a", Network: "tcp", ListenPort: 22, Target: "127.0.0.1:22"}, {Name: "b", Network: "tcp", ListenPort: 22, Target: "127.0.0.1:23"}}}}, want: "端口重复"},
-		{name: "target", cfg: Config{Tailscale: Tailscale{Enabled: true, InboundForwards: []InboundForward{{Name: "a", Network: "tcp", ListenPort: 22, Target: "invalid"}}}}, want: "host:port"},
-	}
-	for _, testCase := range testCases {
-		t.Run(testCase.name, func(t *testing.T) {
-			if err := testCase.cfg.Validate(); err == nil || !strings.Contains(err.Error(), testCase.want) {
-				t.Fatalf("Validate error = %v, want %q", err, testCase.want)
-			}
-		})
 	}
 }
 

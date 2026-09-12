@@ -5,7 +5,7 @@ import "testing"
 func TestReleasedCoreDefaultUpgrade(t *testing.T) {
 	for _, goos := range []string{"windows", "linux"} {
 		for _, pinned := range []bool{false, true} {
-			component := Component{Repo: DefaultMihomoRepo, ReleaseTag: "mihomo-v1.19.29-meshmux.1", AssetPattern: `mihomo-windows-amd64-compatible-v1\.19\.29-meshmux\.1\.zip$`}
+			component := Component{Repo: LegacyMihomoRepo, ReleaseTag: "mihomo-v1.19.29-meshmux.1", AssetPattern: `mihomo-windows-amd64-compatible-v1\.19\.29-meshmux\.1\.zip$`}
 			if pinned {
 				component.SHA256 = "explicit-user-pin"
 			}

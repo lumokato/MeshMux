@@ -141,8 +141,8 @@ func runManaged(ctx context.Context, cfg *config.Config, profile string, supervi
 	unlock()
 	released = true
 	// Process creation is the only synchronous startup gate. TUN creation,
-	// Tailnet login, controller reachability and route/DNS cleanup are runtime
-	// states and must not delay or invalidate service registration.
+	// controller reachability and route/DNS cleanup are runtime states and
+	// must not delay or invalidate service registration.
 	if ready != nil {
 		if err := ready(process.pid); err != nil {
 			_ = Stop(cfg)

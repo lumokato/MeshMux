@@ -37,17 +37,15 @@ type Server struct {
 }
 
 type platformUI struct {
-	RuntimeTitle       string
-	RuntimeTarget      string
-	RuntimeTargetType  string
-	RuntimeHostname    string
-	RuntimeOutput      string
-	ProxyModeLabel     string
-	SubscriptionScope  string
-	InboundScope       string
-	InboundPlaceholder string
-	SystemProxy        bool
-	RuntimeActions     bool
+	RuntimeTitle      string
+	RuntimeTarget     string
+	RuntimeTargetType string
+	RuntimeHostname   string
+	RuntimeOutput     string
+	ProxyModeLabel    string
+	SubscriptionScope string
+	SystemProxy       bool
+	RuntimeActions    bool
 }
 
 func Start(configPath string) (*Server, error) {
@@ -187,24 +185,6 @@ func buildStatusFor(goos string, cfg *config.Config) statusPayload {
 	} else {
 		add("订阅", "未配置", "warn", "")
 	}
-	if cfg.Tailscale.Enabled {
-		tailnet := runtimeTailnetStatus(goos, cfg)
-		if tailnet.connected {
-			add("Tailnet", "已连接", "ok", fmt.Sprintf("%d 条路由，%d 个入站转发", len(cfg.Tailscale.Routes)+len(cfg.Tailscale.IPv6Routes), len(cfg.Tailscale.InboundForwards)))
-		} else if tailnet.detail != "" {
-			if strings.HasPrefix(tailnet.detail, "近期") {
-				add("Tailnet", "路径异常", "warn", tailnet.detail)
-			} else {
-				add("Tailnet", "连接异常", "err", tailnet.detail)
-			}
-		} else if cfg.Tailscale.AuthKey != "" || cfg.Tailscale.AuthKeyFile != "" {
-			add("Tailnet", "已配置，运行态需验证", "warn", fmt.Sprintf("%d 条路由，%d 个入站转发", len(cfg.Tailscale.Routes)+len(cfg.Tailscale.IPv6Routes), len(cfg.Tailscale.InboundForwards)))
-		} else {
-			add("Tailnet", "缺少 Auth Key", "warn", "")
-		}
-	} else {
-		add("Tailnet", "关闭", "muted", "")
-	}
 	wg := generator.SummarizeWireGuard(cfg.WireGuard.Configs)
 	if wg.ConfigCount == 0 {
 		add("WireGuard", "未配置", "muted", "")
@@ -254,127 +234,6 @@ func runtimeTUNEnabled(cfg *config.Config) bool {
 		return false
 	}
 	return current.TUN.Enable
-}
-
-type tailnetRuntimeStatus struct {
-	connected bool
-	detail    string
-}
-
-func runtimeTailnetStatus(goos string, cfg *config.Config) tailnetRuntimeStatus {
-	stateDir := filepath.Join("state", "tailscale")
-	logPath := filepath.Join("logs", "mihomo.out.log")
-	if goos == "windows" && winservice.Installed() {
-		serviceHome := winservice.DataDir()
-		stateDir = filepath.Join(serviceHome, "state", "tailscale")
-		logPath = filepath.Join(serviceHome, "logs", "mihomo.out.log")
-	}
-	client := &http.Client{Timeout: 700 * time.Millisecond}
-	resp, err := client.Get("http://" + cfg.Ports.Controller + "/proxies/Tailnet")
-	if err != nil {
-		return tailnetRuntimeStatus{}
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return tailnetRuntimeStatus{}
-	}
-	var proxy struct {
-		Alive bool `json:"alive"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&proxy); err != nil {
-		return tailnetRuntimeStatus{detail: "Tailnet 运行态响应无效"}
-	}
-	if !proxy.Alive {
-		return tailnetRuntimeStatus{detail: "Tailnet 代理未就绪"}
-	}
-	evidence := recentTailnetEvidence(logPath, time.Now())
-	if evidence.connected {
-		return tailnetRuntimeStatus{connected: true}
-	}
-	if evidence.detail != "" {
-		return evidence
-	}
-	if tailnetStateValid(stateDir) {
-		return tailnetRuntimeStatus{connected: true}
-	}
-	return tailnetRuntimeStatus{}
-}
-
-func recentTailnetEvidence(path string, now time.Time) tailnetRuntimeStatus {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return tailnetRuntimeStatus{}
-	}
-	const maxTail = 256 << 10
-	if len(data) > maxTail {
-		data = data[len(data)-maxTail:]
-	}
-	lines := strings.Split(string(data), "\n")
-	cutoff := now.Add(-2 * time.Minute)
-	consecutive := 0
-	for index := len(lines) - 1; index >= 0; index-- {
-		line := lines[index]
-		if timestamp, ok := logTimestamp(line); ok && timestamp.Before(cutoff) {
-			break
-		}
-		if strings.Contains(line, "using TS[Tailnet]") {
-			return tailnetRuntimeStatus{connected: true}
-		}
-		if strings.Contains(line, "Authkey is set; but state is NoState") {
-			return tailnetRuntimeStatus{detail: "Tailnet 身份状态未加载"}
-		}
-		if strings.Contains(line, "Start inbound forwards for proxy [Tailnet] failed") {
-			return tailnetRuntimeStatus{detail: "Tailnet 入站启动失败"}
-		}
-		if strings.Contains(line, "dial TS") && (strings.Contains(line, "context deadline exceeded") || strings.Contains(line, "invalid Listen addr")) {
-			consecutive++
-			if consecutive >= 3 {
-				return tailnetRuntimeStatus{detail: "近期 Tailnet 请求持续失败"}
-			}
-		}
-	}
-	return tailnetRuntimeStatus{}
-}
-
-func recentTailnetFailure(path string, now time.Time) string {
-	evidence := recentTailnetEvidence(path, now)
-	if evidence.connected {
-		return ""
-	}
-	return evidence.detail
-}
-
-func tailnetStateValid(dir string) bool {
-	data, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
-	if err != nil || len(data) == 0 {
-		return false
-	}
-	var state map[string]json.RawMessage
-	if json.Unmarshal(data, &state) != nil {
-		return false
-	}
-	for _, key := range []string{"_machinekey", "_current-profile", "_profiles"} {
-		value, ok := state[key]
-		if !ok || len(value) == 0 || string(value) == `""` || string(value) == "null" {
-			return false
-		}
-	}
-	return true
-}
-
-func logTimestamp(line string) (time.Time, bool) {
-	const marker = `time="`
-	start := strings.Index(line, marker)
-	if start < 0 {
-		return time.Time{}, false
-	}
-	start += len(marker)
-	end := strings.Index(line[start:], `"`)
-	if end < 0 {
-		return time.Time{}, false
-	}
-	parsed, err := time.Parse(time.RFC3339Nano, line[start:start+end])
-	return parsed, err == nil
 }
 
 func tcpReady(addr string) bool {
@@ -507,8 +366,6 @@ func renderIndexHTML(goos string) string {
 		"{{RUNTIME_OUTPUT}}", ui.RuntimeOutput,
 		"{{PROXY_MODE_LABEL}}", ui.ProxyModeLabel,
 		"{{SUBSCRIPTION_SCOPE}}", ui.SubscriptionScope,
-		"{{INBOUND_SCOPE}}", ui.InboundScope,
-		"{{INBOUND_PLACEHOLDER}}", ui.InboundPlaceholder,
 		"{{SYSTEM_PROXY_CLASS}}", boolClass(ui.SystemProxy),
 		"{{RUNTIME_ACTION_HIDDEN}}", hiddenAttribute(ui.RuntimeActions),
 	)
@@ -516,7 +373,8 @@ func renderIndexHTML(goos string) string {
 }
 
 func platformUIFor(goos string) platformUI {
-	if goos == "linux" {
+	switch goos {
+	case "linux":
 		return platformUI{
 			RuntimeTitle:       "Linux 服务器运行",
 			RuntimeTarget:      "linux",
@@ -525,24 +383,33 @@ func platformUIFor(goos string) platformUI {
 			RuntimeOutput:      "profiles/linux.yaml",
 			ProxyModeLabel:     "代理端口（固定）",
 			SubscriptionScope:  "Linux 服务器和手机共用",
-			InboundScope:       "Linux 主机的局域网或公网网卡",
-			InboundPlaceholder: "linux-ssh,tcp,22,127.0.0.1:22",
 			SystemProxy:        false,
 			RuntimeActions:     false,
 		}
-	}
-	return platformUI{
-		RuntimeTitle:       "Windows 运行方式",
-		RuntimeTarget:      "windows",
-		RuntimeTargetType:  "windows-mihomo",
-		RuntimeHostname:    "windows-meshmux",
-		RuntimeOutput:      "profiles/windows.yaml",
-		ProxyModeLabel:     "系统代理",
-		SubscriptionScope:  "Windows 和手机共用",
-		InboundScope:       "Windows 局域网或公网网卡",
-		InboundPlaceholder: "windows-ssh,tcp,22,127.0.0.1:22",
-		SystemProxy:        true,
-		RuntimeActions:     true,
+	case "darwin":
+		return platformUI{
+			RuntimeTitle:       "macOS 运行方式",
+			RuntimeTarget:      "darwin",
+			RuntimeTargetType:  "darwin-mihomo",
+			RuntimeHostname:    "mac-meshmux",
+			RuntimeOutput:      "profiles/darwin.yaml",
+			ProxyModeLabel:     "系统代理",
+			SubscriptionScope:  "macOS 和手机共用",
+			SystemProxy:        true,
+			RuntimeActions:     true,
+		}
+	default:
+		return platformUI{
+			RuntimeTitle:       "Windows 运行方式",
+			RuntimeTarget:      "windows",
+			RuntimeTargetType:  "windows-mihomo",
+			RuntimeHostname:    "windows-meshmux",
+			RuntimeOutput:      "profiles/windows.yaml",
+			ProxyModeLabel:     "系统代理",
+			SubscriptionScope:  "Windows 和手机共用",
+			SystemProxy:        true,
+			RuntimeActions:     true,
+		}
 	}
 }
 
