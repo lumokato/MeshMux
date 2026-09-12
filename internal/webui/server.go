@@ -193,7 +193,36 @@ func buildStatusFor(goos string, cfg *config.Config) statusPayload {
 	} else {
 		add("WireGuard", fmt.Sprintf("%d 个配置", wg.ReadableCount), "ok", fmt.Sprintf("%d 个 peer", wg.PeerCount))
 	}
+	ts := tailscaleStatusItem(cfg)
+	add("Tailnet", ts.Value, ts.State, ts.Detail)
 	return statusPayload{Items: items, Logs: recentStatusLogs()}
+}
+
+// tailscaleStatusItem reports the bundled tailscaled state. The daemon is
+// queried through its private socket; a missing binary or a stopped daemon
+// surfaces as an error state rather than being silently omitted.
+func tailscaleStatusItem(cfg *config.Config) statusItem {
+	if !cfg.Tailscale.Enabled {
+		return statusItem{Value: "关闭", State: "muted"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	status, err := runner.TailscaleStatus(ctx, cfg)
+	if err != nil {
+		return statusItem{Value: "守护进程未运行", State: "err", Detail: err.Error()}
+	}
+	detail := strings.Join(status.TailscaleIPs, ", ")
+	switch status.BackendState {
+	case "Running":
+		if status.Online {
+			return statusItem{Value: "已连接", State: "ok", Detail: detail}
+		}
+		return statusItem{Value: "已登录", State: "warn", Detail: detail}
+	case "NeedsLogin":
+		return statusItem{Value: "需要登录", State: "warn", Detail: "运行 meshmux tailscale up 或填入 Auth Key"}
+	default:
+		return statusItem{Value: status.BackendState, State: "warn", Detail: strings.Join(status.Health, "; ")}
+	}
 }
 
 func tunStatusFor(goos string, enabled, runtimeEnabled bool, canStartTUN func() bool) statusItem {

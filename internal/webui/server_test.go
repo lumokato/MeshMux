@@ -173,6 +173,23 @@ func TestTUNStatusUsesPlatformRuntimeEvidence(t *testing.T) {
 	}
 }
 
+func TestTailnetStatusItemStates(t *testing.T) {
+	disabled := &config.Config{}
+	if item := tailscaleStatusItem(disabled); item.Value != "关闭" || item.State != "muted" {
+		t.Fatalf("disabled tailnet item = %+v", item)
+	}
+
+	// A missing tailscale binary must surface as an error state rather than
+	// being silently omitted from the status page.
+	enabled := &config.Config{}
+	enabled.Tailscale.Enabled = true
+	enabled.Components.Tailscale.Path = filepath.Join(t.TempDir(), "missing", "tailscaled.exe")
+	item := tailscaleStatusItem(enabled)
+	if item.Value != "守护进程未运行" || item.State != "err" {
+		t.Fatalf("missing-daemon tailnet item = %+v", item)
+	}
+}
+
 func TestPlatformActionPolicy(t *testing.T) {
 	blocked := []string{"start", "stop", "proxy-on", "proxy-off", "dashboard"}
 	for _, action := range blocked {
@@ -475,7 +492,7 @@ func TestStatusAPIContainsCommonItems(t *testing.T) {
 	for _, item := range payload.Items {
 		labels[item.Label] = true
 	}
-	for _, want := range []string{"核心进程", "TUN", "系统代理", "开机自启", "混合端口", "控制接口", "订阅", "WireGuard"} {
+	for _, want := range []string{"核心进程", "TUN", "系统代理", "开机自启", "混合端口", "控制接口", "订阅", "WireGuard", "Tailnet"} {
 		if !labels[want] {
 			t.Fatalf("status missing %q in %+v", want, payload.Items)
 		}

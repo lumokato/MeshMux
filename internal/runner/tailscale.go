@@ -227,3 +227,33 @@ func TailscaleStatus(ctx context.Context, cfg *config.Config) (TailscaleState, e
 	}
 	return status, nil
 }
+
+// withTailscaleSupervision runs fn alongside a tailscaled daemon when the
+// configuration enables it. The daemon stops when fn returns or ctx is
+// cancelled; a daemon failure alone does not abort fn.
+// The windows service path supervises tailscaled separately and must not use
+// this wrapper, or two daemons would race for the same socket.
+func withTailscaleSupervision(ctx context.Context, cfg *config.Config, fn func() error) error {
+	if cfg == nil || !cfg.Tailscale.Enabled {
+		return fn()
+	}
+	daemonCtx, stopDaemon := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		err := TailscaleSupervision(daemonCtx, cfg)
+		select {
+		case done <- err:
+		case <-daemonCtx.Done():
+		}
+	}()
+	fnErr := fn()
+	stopDaemon()
+	tsErr := <-done
+	if fnErr != nil {
+		return fnErr
+	}
+	if errors.Is(tsErr, context.Canceled) {
+		return nil
+	}
+	return tsErr
+}

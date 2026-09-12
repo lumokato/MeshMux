@@ -56,7 +56,9 @@ func SuperviseContext(ctx context.Context, cfg *config.Config, profile string, r
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return runManaged(ctx, cfg, profile, true, false, ready)
+	return withTailscaleSupervision(ctx, cfg, func() error {
+		return runManaged(ctx, cfg, profile, true, false, ready)
+	})
 }
 
 func ServiceContext(ctx context.Context, cfg *config.Config, profile string, ready func(int) error) error {
@@ -70,7 +72,9 @@ func RunContext(ctx context.Context, cfg *config.Config, profile string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return runManaged(ctx, cfg, profile, true, true, nil)
+	return withTailscaleSupervision(ctx, cfg, func() error {
+		return runManaged(ctx, cfg, profile, true, true, nil)
+	})
 }
 
 func runManaged(ctx context.Context, cfg *config.Config, profile string, supervise, failOnExit bool, ready func(int) error) error {
