@@ -5,6 +5,7 @@ MeshMux 安装包包含以下上游组件。各组件按其上游许可证发布
 | 组件 | 用途 | 来源 | 许可证 |
 | --- | --- | --- | --- |
 | mihomo | 代理核心 | https://github.com/MetaCubeX/mihomo | GPL-3.0 |
+| tailscaled / tailscale | Tailnet 守护进程与 CLI；以上游官方 tag 的源码构建，无任何代码改动 | https://github.com/tailscale/tailscale | BSD-3-Clause |
 | MetaCubeXD | mihomo 面板 | https://github.com/MetaCubeX/metacubexd | MIT |
 | geoip.metadb | GEOIP 数据库 | https://github.com/MetaCubeX/meta-rules-dat | GPL-3.0 |
 

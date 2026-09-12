@@ -58,6 +58,14 @@
     "domains": [],
     "routes": []
   },
+  "tailscale": {
+    "enabled": false,
+    "authKey": "",
+    "authKeyFile": "",
+    "hostname": "",
+    "acceptRoutes": null,
+    "acceptDNS": false
+  },
   "rules": {
     "directCidrs": [
       "127.0.0.0/8",

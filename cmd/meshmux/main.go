@@ -223,6 +223,8 @@ func run(args []string) error {
 	case "autostart":
 		mode := commandArg(args[1:], "show")
 		return runner.Autostart(mode)
+	case "tailscale":
+		return tailscaleCommand(args[1:])
 	case "service":
 		return manageWindowsService(args[1:])
 	default:
@@ -410,6 +412,42 @@ func checkConfig(args []string, output io.Writer) error {
 	}
 	fmt.Fprintln(output, "result: ready")
 	return nil
+}
+
+func tailscaleCommand(args []string) error {
+	cfg, _, err := load(args)
+	if err != nil {
+		return err
+	}
+	action := strings.ToLower(strings.TrimSpace(commandArg(args, "status")))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	switch action {
+	case "up":
+		return runner.TailscaleUp(ctx, cfg)
+	case "down":
+		return runner.TailscaleDown(ctx, cfg)
+	case "status":
+		status, err := runner.TailscaleStatus(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("tailscale: %s\n", status.BackendState)
+		if status.Online {
+			fmt.Println("online: true")
+		} else {
+			fmt.Println("online: false")
+		}
+		for _, ip := range status.TailscaleIPs {
+			fmt.Println("ip:", ip)
+		}
+		for _, problem := range status.Health {
+			fmt.Println("health:", problem)
+		}
+		return nil
+	default:
+		return fmt.Errorf("tailscale expects up, down, or status")
+	}
 }
 
 func fileHasContent(path string) bool {

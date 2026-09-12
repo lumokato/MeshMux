@@ -93,9 +93,39 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 		coreDone = nil
 		return err
 	}
+	var tsCore *serviceCore
+	var tsDone <-chan struct{}
+	startTailscale := func() error {
+		cfg, _, err := load(configArgs(h.configPath))
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		if !cfg.Tailscale.Enabled {
+			return nil
+		}
+		replacement := startTailscaleService(cfg)
+		tsCore = replacement
+		tsDone = replacement.done
+		return nil
+	}
+	stopTailscale := func() error {
+		if tsCore == nil {
+			return nil
+		}
+		err := stopServiceCore(tsCore, 5*time.Second)
+		if err != nil {
+			return err
+		}
+		tsCore = nil
+		tsDone = nil
+		return err
+	}
 	defer func() {
 		if core != nil {
 			core.cancel()
+		}
+		if tsCore != nil {
+			tsCore.cancel()
 		}
 	}()
 
@@ -136,6 +166,9 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 		appendServiceLog(h.configPath, err.Error())
 		scheduleRetry()
 	}
+	if err := startTailscale(); err != nil {
+		appendServiceLog(h.configPath, "tailscale: "+err.Error())
+	}
 
 	for {
 		select {
@@ -154,8 +187,13 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 				stopResumeTimer()
 				stopRetryTimer()
 				changes <- svc.Status{State: svc.StopPending}
-				if err := stopCore(); err != nil {
-					return serviceFailure(h.configPath, "stop core", err)
+				stopErr := stopCore()
+				tsStopErr := stopTailscale()
+				if stopErr != nil {
+					return serviceFailure(h.configPath, "stop core", stopErr)
+				}
+				if tsStopErr != nil {
+					return serviceFailure(h.configPath, "stop tailscale", tsStopErr)
 				}
 				return false, 0
 			}
@@ -172,6 +210,9 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 				scheduleRetry()
 				continue
 			}
+			if err := startTailscale(); err != nil {
+				appendServiceLog(h.configPath, "power resume: tailscale: "+err.Error())
+			}
 			appendServiceLog(h.configPath, "power resume: core start scheduled")
 		case <-coreDone:
 			err := core.err
@@ -184,11 +225,25 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 				appendServiceLog(h.configPath, "run core: process exited")
 			}
 			scheduleRetry()
+		case <-tsDone:
+			err := tsCore.err
+			tsCore.cancel()
+			tsCore = nil
+			tsDone = nil
+			if err != nil {
+				appendServiceLog(h.configPath, "tailscale: "+err.Error())
+			} else {
+				appendServiceLog(h.configPath, "tailscale: daemon exited")
+			}
+			scheduleRetry()
 		case <-retry:
 			retry = nil
 			if err := startCore(); err != nil {
 				appendServiceLog(h.configPath, err.Error())
 				scheduleRetry()
+			}
+			if err := startTailscale(); err != nil {
+				appendServiceLog(h.configPath, "tailscale: "+err.Error())
 			}
 		}
 	}
@@ -226,6 +281,20 @@ func isResumePowerEvent(eventType uint32) bool {
 
 var runServiceCore = func(ctx context.Context, cfg *config.Config, profile string, ready func(int) error) error {
 	return runner.ServiceContext(ctx, cfg, profile, ready)
+}
+
+var runTailscaleSupervision = func(ctx context.Context, cfg *config.Config) error {
+	return runner.TailscaleSupervision(ctx, cfg)
+}
+
+func startTailscaleService(cfg *config.Config) *serviceCore {
+	ctx, cancel := context.WithCancel(context.Background())
+	core := &serviceCore{cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(core.done)
+		core.err = runTailscaleSupervision(ctx, cfg)
+	}()
+	return core
 }
 
 var (

@@ -34,6 +34,17 @@ const (
 	OfficialLinuxMihomoAssetPattern = `mihomo-linux-amd64-compatible.*\.gz$`
 )
 
+const (
+	// DefaultTailscaleRepo hosts rebuilds of the official tailscale binaries
+	// built from an upstream tag without source changes (upstream does not
+	// publish raw tailscaled binaries for Windows and macOS).
+	DefaultTailscaleRepo         = "lumokato/MeshMux"
+	DefaultTailscaleReleaseTag   = ""
+	DefaultTailscaleAssetPattern = `tailscale-windows-amd64-.*\.zip$`
+	LinuxTailscaleAssetPattern   = `tailscale-linux-amd64-.*\.tar\.gz$`
+	DarwinTailscaleAssetPattern  = `tailscale-darwin-amd64-.*\.zip$`
+)
+
 type Config struct {
 	Name       string          `json:"name"`
 	Setup      Setup           `json:"setup"`
@@ -41,6 +52,7 @@ type Config struct {
 	Paths      Paths           `json:"paths"`
 	Providers  []Provider      `json:"providers,omitempty"`
 	WireGuard  WireGuard       `json:"wireguard"`
+	Tailscale  Tailscale       `json:"tailscale"`
 	TUN        TUN             `json:"tun"`
 	DNS        DNS             `json:"dns"`
 	Rules      Rules           `json:"rules"`
@@ -80,6 +92,21 @@ type WireGuard struct {
 	RemoteDNSResolve bool     `json:"remoteDnsResolve"`
 	Domains          []string `json:"domains"`
 	Routes           []string `json:"routes"`
+}
+
+// Tailscale configures the bundled upstream tailscaled daemon. Tailnet
+// membership and inbound access belong to tailscaled; MeshMux supervises the
+// process and applies the desired state through the tailscale CLI.
+type Tailscale struct {
+	Enabled     bool   `json:"enabled"`
+	AuthKey     string `json:"authKey,omitempty"`
+	AuthKeyFile string `json:"authKeyFile,omitempty"`
+	Hostname    string `json:"hostname,omitempty"`
+	// AcceptRoutes is nil to follow the tailscale CLI's platform default.
+	AcceptRoutes *bool `json:"acceptRoutes,omitempty"`
+	// AcceptDNS defaults to false so MagicDNS does not take over the system
+	// resolver while mihomo is running.
+	AcceptDNS bool `json:"acceptDNS"`
 }
 
 type TUN struct {
@@ -130,6 +157,7 @@ type PublishTarget struct {
 type Components struct {
 	Mihomo    Component `json:"mihomo"`
 	Dashboard Component `json:"dashboard"`
+	Tailscale Component `json:"tailscale"`
 }
 
 type Component struct {
@@ -320,6 +348,9 @@ func IsBootstrapConfig(data []byte) bool {
 	if len(cfg.WireGuard.Configs) > 0 || len(cfg.WireGuard.Domains) > 0 || len(cfg.WireGuard.Routes) > 0 {
 		return false
 	}
+	if cfg.Tailscale.Enabled || strings.TrimSpace(cfg.Tailscale.AuthKey) != "" || strings.TrimSpace(cfg.Tailscale.AuthKeyFile) != "" {
+		return false
+	}
 	// Only fields the installer template leaves empty are checked here. The
 	// template already carries real defaults for ports, TUN, DNS and rules, so
 	// comparing those against zero values would misclassify the template itself
@@ -427,6 +458,18 @@ func (c *Config) applyDefaults(goos string) {
 	if c.Components.Dashboard.AssetPattern == "" {
 		c.Components.Dashboard.AssetPattern = `compressed-dist\.tgz$`
 	}
+	if c.Components.Tailscale.Path == "" {
+		c.Components.Tailscale.Path = DefaultTailscaledPathFor(goos)
+	}
+	if c.Components.Tailscale.Repo == "" {
+		c.Components.Tailscale.Repo = DefaultTailscaleRepo
+	}
+	if c.Components.Tailscale.AssetPattern == "" {
+		c.Components.Tailscale.AssetPattern = DefaultTailscaleAssetPatternFor(goos)
+	}
+	if c.Tailscale.Hostname == "" {
+		c.Tailscale.Hostname = DefaultTargetNameFor(goos) + "-meshmux"
+	}
 	c.deriveSetup()
 	c.deriveSubStoreDNS()
 	c.applySetup(goos)
@@ -495,6 +538,37 @@ func DefaultMihomoAssetPatternFor(goos string) string {
 		return DarwinMihomoAssetPattern
 	default:
 		return DefaultMihomoAssetPattern
+	}
+}
+
+func DefaultTailscaledPath() string {
+	return DefaultTailscaledPathFor(runtime.GOOS)
+}
+
+func DefaultTailscaledPathFor(goos string) string {
+	name := "tailscaled"
+	if goos == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join("bin", name)
+}
+
+func DefaultTailscaleCLIPathFor(goos string) string {
+	name := "tailscale"
+	if goos == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join("bin", name)
+}
+
+func DefaultTailscaleAssetPatternFor(goos string) string {
+	switch goos {
+	case "linux":
+		return LinuxTailscaleAssetPattern
+	case "darwin":
+		return DarwinTailscaleAssetPattern
+	default:
+		return DefaultTailscaleAssetPattern
 	}
 }
 
