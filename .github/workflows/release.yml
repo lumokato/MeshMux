@@ -373,7 +373,11 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          pattern: "{MeshMux-*,Tailscale-*}"
+          # MeshMux-* is the app itself; Tailscale-component-archives carries the
+          # packaged tailscale binaries the app downloads by asset name
+          # (config.DefaultTailscaleRepo). Tailscale-windows-unpacked is a build
+          # intermediate for the windows job and must not be published.
+          pattern: "{MeshMux-*,Tailscale-component-archives}"
           path: release-assets
           merge-multiple: true
 
@@ -386,9 +390,15 @@ jobs:
         run: |
           set -euo pipefail
           cd release-assets
+          # Exactly one installer and one Linux bundle. The release also carries
+          # the packaged tailscale components, so match the app assets by name
+          # instead of counting every .exe/.tar.gz in the directory.
+          test "$(find . -maxdepth 1 -type f -name 'MeshMux-Setup-*.exe' | wc -l)" -eq 1
+          test "$(find . -maxdepth 1 -type f -name 'MeshMux-linux-amd64-*.tar.gz' | wc -l)" -eq 1
+          for pattern in 'tailscale-windows-amd64-*.zip' 'tailscale-linux-amd64-*.tar.gz' 'tailscale-darwin-amd64-*.zip'; do
+            test "$(find . -maxdepth 1 -type f -name "$pattern" | wc -l)" -eq 1
+          done
           sha256sum --check --strict ./*.sha256
-          test "$(find . -maxdepth 1 -type f -name '*.exe' | wc -l)" -eq 1
-          test "$(find . -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
