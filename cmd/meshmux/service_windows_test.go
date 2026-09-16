@@ -709,3 +709,40 @@ func TestRestartRollsBackPartiallyWrittenAssetsOnPrepareFailure(t *testing.T) {
 		t.Fatalf("service control ran before snapshot preparation completed: %v", actions)
 	}
 }
+
+// Spawning a component returns without an error long before the process proves
+// it can survive, so the retry schedule must only be cleared once a component
+// has actually stayed up.
+func TestServiceRetryBacksOffUntilTheComponentStaysUp(t *testing.T) {
+	retry := newServiceRetry()
+
+	for round := 0; round < 3; round++ {
+		retry.observe(serviceRetryMinUptime - time.Second)
+		retry.schedule()
+	}
+	if retry.attempt != 3 {
+		t.Fatalf("attempt = %d, want 3 after three short-lived runs", retry.attempt)
+	}
+	if got, want := serviceRetryBackoff(retry.attempt), 4*serviceCoreRetryDelay; got != want {
+		t.Fatalf("delay after three short-lived runs = %s, want %s", got, want)
+	}
+
+	retry.observe(serviceRetryMinUptime)
+	if retry.attempt != 0 {
+		t.Fatalf("attempt = %d, want 0 once the component stayed up", retry.attempt)
+	}
+	if got := serviceRetryBackoff(1); got != serviceCoreRetryDelay {
+		t.Fatalf("base delay = %s, want %s", got, serviceCoreRetryDelay)
+	}
+}
+
+func TestServiceCoreUptimeTracksProcessAge(t *testing.T) {
+	var missing *serviceCore
+	if got := missing.uptime(); got != 0 {
+		t.Fatalf("nil core uptime = %s, want 0", got)
+	}
+	core := &serviceCore{startedAt: time.Now().Add(-2 * time.Second)}
+	if got := core.uptime(); got < time.Second {
+		t.Fatalf("uptime = %s, want at least 1s", got)
+	}
+}

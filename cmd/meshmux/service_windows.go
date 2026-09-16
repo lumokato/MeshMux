@@ -78,6 +78,13 @@ func serviceRetryBackoff(attempt int) time.Duration {
 	return delay
 }
 
+// serviceRetryMinUptime is how long a component must stay up before its retry
+// schedule counts as healthy again. Starting a component only spawns a
+// goroutine, so "start returned no error" says nothing about the process
+// surviving; without this, a daemon that exits immediately would reset the
+// backoff on every attempt and retry forever on the base delay.
+const serviceRetryMinUptime = 30 * time.Second
+
 // serviceRetry tracks one component's retry schedule. Components back off
 // independently so a failure in one never restarts the other.
 type serviceRetry struct {
@@ -95,6 +102,15 @@ func (r *serviceRetry) schedule() {
 	r.attempt++
 	r.timer = time.NewTimer(serviceRetryBackoff(r.attempt))
 	r.ready = r.timer.C
+}
+
+// observe clears the accumulated backoff only after a component has actually
+// stayed up. A short-lived run keeps the current attempt so the delay keeps
+// growing.
+func (r *serviceRetry) observe(uptime time.Duration) {
+	if uptime >= serviceRetryMinUptime {
+		r.reset()
+	}
 }
 
 func (r *serviceRetry) reset() {
@@ -209,21 +225,19 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 	defer coreRetry.stop()
 	defer tailscaleRetry.stop()
 
+	// A successful return only means the component was spawned; the retry
+	// schedule is cleared later, once the process has actually stayed up.
 	startCoreTracked := func() {
 		if err := startCore(); err != nil {
 			appendServiceLog(h.configPath, err.Error())
 			coreRetry.schedule()
-			return
 		}
-		coreRetry.reset()
 	}
 	startTailscaleTracked := func() {
 		if err := startTailscale(); err != nil {
 			appendServiceLog(h.configPath, "tailscale: "+err.Error())
 			tailscaleRetry.schedule()
-			return
 		}
-		tailscaleRetry.reset()
 	}
 	startCoreTracked()
 	startTailscaleTracked()
@@ -270,16 +284,15 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 				coreRetry.schedule()
 				continue
 			}
-			coreRetry.reset()
 			if err := startTailscale(); err != nil {
 				appendServiceLog(h.configPath, "power resume: tailscale: "+err.Error())
 				tailscaleRetry.schedule()
 				continue
 			}
-			tailscaleRetry.reset()
 			appendServiceLog(h.configPath, "power resume: core start scheduled")
 		case <-coreDone:
 			err := core.err
+			uptime := core.uptime()
 			core.cancel()
 			core = nil
 			coreDone = nil
@@ -288,9 +301,11 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 			} else {
 				appendServiceLog(h.configPath, "run core: process exited")
 			}
+			coreRetry.observe(uptime)
 			coreRetry.schedule()
 		case <-tsDone:
 			err := tsCore.err
+			uptime := tsCore.uptime()
 			tsCore.cancel()
 			tsCore = nil
 			tsDone = nil
@@ -301,36 +316,43 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 			}
 			// Only the tailscale component is rescheduled; the mihomo core keeps
 			// running untouched.
+			tailscaleRetry.observe(uptime)
 			tailscaleRetry.schedule()
 		case <-coreRetry.ready:
 			coreRetry.ready = nil
 			if err := startCore(); err != nil {
 				appendServiceLog(h.configPath, err.Error())
 				coreRetry.schedule()
-			} else {
-				coreRetry.reset()
 			}
 		case <-tailscaleRetry.ready:
 			tailscaleRetry.ready = nil
 			if err := startTailscale(); err != nil {
 				appendServiceLog(h.configPath, "tailscale: "+err.Error())
 				tailscaleRetry.schedule()
-			} else {
-				tailscaleRetry.reset()
 			}
 		}
 	}
 }
 
 type serviceCore struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	err    error
+	cancel    context.CancelFunc
+	done      chan struct{}
+	err       error
+	startedAt time.Time
+}
+
+// uptime reports how long the component process has been supervised. It is
+// read when the process exits to decide whether the run was healthy.
+func (c *serviceCore) uptime() time.Duration {
+	if c == nil || c.startedAt.IsZero() {
+		return 0
+	}
+	return time.Since(c.startedAt)
 }
 
 func startServiceCore(cfg *config.Config, profile string) *serviceCore {
 	ctx, cancel := context.WithCancel(context.Background())
-	core := &serviceCore{cancel: cancel, done: make(chan struct{})}
+	core := &serviceCore{cancel: cancel, done: make(chan struct{}), startedAt: time.Now()}
 	go func() {
 		defer close(core.done)
 		core.err = runServiceCore(ctx, cfg, profile, func(int) error { return nil })
