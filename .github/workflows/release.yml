@@ -9,7 +9,7 @@ on:
       version:
         description: "Release version"
         required: true
-        default: "0.3.6"
+        default: "0.3.7"
   push:
     tags:
       - "v*"
@@ -22,7 +22,7 @@ env:
   DASHBOARD_VERSION: v1.273.0
   DASHBOARD_SHA256: 076e05d2e3dc6641a0ec281aa4b97a18193fbcc379d139762c32d90adb22793c
   GEOIP_SHA256: 185CB54663CBC89D5325D5249AFDAE99DEF292A0EDD10539F8A05218A896602F
-  DEVELOPMENT_VERSION: 0.3.6
+  DEVELOPMENT_VERSION: 0.3.7
   # Upstream mihomo assets, hashed from
   #   https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.30
   # When bumping the version, re-hash the new assets and update these values.
