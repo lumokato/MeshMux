@@ -56,6 +56,63 @@ const (
 
 var serviceResumeDelay = 5 * time.Second
 var serviceCoreRetryDelay = 5 * time.Second
+var serviceRetryMaxDelay = 5 * time.Minute
+
+// serviceRetryBackoff returns the delay before the nth consecutive retry of one
+// component. A fixed interval turned a single missing binary into a permanent
+// five-second restart storm, so the delay doubles up to serviceRetryMaxDelay.
+func serviceRetryBackoff(attempt int) time.Duration {
+	if attempt <= 1 {
+		return serviceCoreRetryDelay
+	}
+	delay := serviceCoreRetryDelay
+	for index := 1; index < attempt; index++ {
+		if delay >= serviceRetryMaxDelay {
+			break
+		}
+		delay *= 2
+	}
+	if delay > serviceRetryMaxDelay {
+		delay = serviceRetryMaxDelay
+	}
+	return delay
+}
+
+// serviceRetry tracks one component's retry schedule. Components back off
+// independently so a failure in one never restarts the other.
+type serviceRetry struct {
+	attempt int
+	timer   *time.Timer
+	ready   <-chan time.Time
+}
+
+func newServiceRetry() *serviceRetry {
+	return &serviceRetry{}
+}
+
+func (r *serviceRetry) schedule() {
+	r.stop()
+	r.attempt++
+	r.timer = time.NewTimer(serviceRetryBackoff(r.attempt))
+	r.ready = r.timer.C
+}
+
+func (r *serviceRetry) reset() {
+	r.stop()
+	r.attempt = 0
+}
+
+func (r *serviceRetry) stop() {
+	if r.timer != nil {
+		if !r.timer.Stop() {
+			select {
+			case <-r.timer.C:
+			default:
+			}
+		}
+	}
+	r.ready = nil
+}
 
 func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
 	const accepts = svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPowerEvent
@@ -131,8 +188,6 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 
 	var resumeTimer *time.Timer
 	var resume <-chan time.Time
-	var retryTimer *time.Timer
-	var retry <-chan time.Time
 	stopResumeTimer := func() {
 		if resumeTimer != nil {
 			if !resumeTimer.Stop() {
@@ -145,30 +200,33 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 		resume = nil
 	}
 	defer stopResumeTimer()
-	stopRetryTimer := func() {
-		if retryTimer != nil {
-			if !retryTimer.Stop() {
-				select {
-				case <-retryTimer.C:
-				default:
-				}
-			}
+
+	// The core and the tailscale daemon back off independently. Sharing one
+	// schedule let a missing tailscaled restart the mihomo core every few
+	// seconds, which is what left several cores fighting over the same ports.
+	coreRetry := newServiceRetry()
+	tailscaleRetry := newServiceRetry()
+	defer coreRetry.stop()
+	defer tailscaleRetry.stop()
+
+	startCoreTracked := func() {
+		if err := startCore(); err != nil {
+			appendServiceLog(h.configPath, err.Error())
+			coreRetry.schedule()
+			return
 		}
-		retry = nil
+		coreRetry.reset()
 	}
-	defer stopRetryTimer()
-	scheduleRetry := func() {
-		stopRetryTimer()
-		retryTimer = time.NewTimer(serviceCoreRetryDelay)
-		retry = retryTimer.C
+	startTailscaleTracked := func() {
+		if err := startTailscale(); err != nil {
+			appendServiceLog(h.configPath, "tailscale: "+err.Error())
+			tailscaleRetry.schedule()
+			return
+		}
+		tailscaleRetry.reset()
 	}
-	if err := startCore(); err != nil {
-		appendServiceLog(h.configPath, err.Error())
-		scheduleRetry()
-	}
-	if err := startTailscale(); err != nil {
-		appendServiceLog(h.configPath, "tailscale: "+err.Error())
-	}
+	startCoreTracked()
+	startTailscaleTracked()
 
 	for {
 		select {
@@ -185,7 +243,8 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 				resume = resumeTimer.C
 			case svc.Stop, svc.Shutdown:
 				stopResumeTimer()
-				stopRetryTimer()
+				coreRetry.stop()
+				tailscaleRetry.stop()
 				changes <- svc.Status{State: svc.StopPending}
 				stopErr := stopCore()
 				tsStopErr := stopTailscale()
@@ -199,7 +258,8 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 			}
 		case <-resume:
 			resume = nil
-			stopRetryTimer()
+			coreRetry.stop()
+			tailscaleRetry.stop()
 			appendServiceLog(h.configPath, "power resume: restarting core")
 			if err := stopCore(); err != nil {
 				appendServiceLog(h.configPath, "restart core after resume: "+err.Error())
@@ -207,12 +267,16 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 			}
 			if err := startCore(); err != nil {
 				appendServiceLog(h.configPath, "restart core after resume: "+err.Error())
-				scheduleRetry()
+				coreRetry.schedule()
 				continue
 			}
+			coreRetry.reset()
 			if err := startTailscale(); err != nil {
 				appendServiceLog(h.configPath, "power resume: tailscale: "+err.Error())
+				tailscaleRetry.schedule()
+				continue
 			}
+			tailscaleRetry.reset()
 			appendServiceLog(h.configPath, "power resume: core start scheduled")
 		case <-coreDone:
 			err := core.err
@@ -224,7 +288,7 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 			} else {
 				appendServiceLog(h.configPath, "run core: process exited")
 			}
-			scheduleRetry()
+			coreRetry.schedule()
 		case <-tsDone:
 			err := tsCore.err
 			tsCore.cancel()
@@ -235,15 +299,24 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 			} else {
 				appendServiceLog(h.configPath, "tailscale: daemon exited")
 			}
-			scheduleRetry()
-		case <-retry:
-			retry = nil
+			// Only the tailscale component is rescheduled; the mihomo core keeps
+			// running untouched.
+			tailscaleRetry.schedule()
+		case <-coreRetry.ready:
+			coreRetry.ready = nil
 			if err := startCore(); err != nil {
 				appendServiceLog(h.configPath, err.Error())
-				scheduleRetry()
+				coreRetry.schedule()
+			} else {
+				coreRetry.reset()
 			}
+		case <-tailscaleRetry.ready:
+			tailscaleRetry.ready = nil
 			if err := startTailscale(); err != nil {
 				appendServiceLog(h.configPath, "tailscale: "+err.Error())
+				tailscaleRetry.schedule()
+			} else {
+				tailscaleRetry.reset()
 			}
 		}
 	}
@@ -646,9 +719,13 @@ func prepareServiceSnapshotFiles(sourcePath string) (result string, resultErr er
 	if err := installServiceCore(dataDir); err != nil {
 		return "", err
 	}
+	if err := installServiceComponents(dataDir); err != nil {
+		return "", err
+	}
 
 	stored := cfg.StorageCopy()
 	stored.Components.Mihomo.Path = config.DefaultMihomoPath()
+	stored.Components.Tailscale.Path = config.DefaultTailscaledPath()
 	stored.Paths.Dashboard = "dashboard"
 	configData, err := json.MarshalIndent(stored, "", "  ")
 	if err != nil {
@@ -691,6 +768,54 @@ func copyFileForService(source, target string) error {
 		_, err := io.Copy(out, in)
 		return err
 	})
+}
+
+// installServiceComponents seeds the bundled tailscale trio and the shared TUN
+// driver into the directory the service actually reads. The installer places
+// them next to its own executable, but the service resolves bin/ relative to
+// its data directory, so without this copy every tailscaled start fails and a
+// copied mihomo core silently loses TUN support.
+func installServiceComponents(dataDir string) error {
+	candidates := []struct {
+		source string
+		target string
+	}{
+		{config.BundledTailscaledPath(), filepath.Join(dataDir, config.DefaultTailscaledPath())},
+		{config.BundledTailscaleCLIPath(), filepath.Join(dataDir, config.DefaultTailscaleCLIPath())},
+		{config.BundledWintunPath(), filepath.Join(dataDir, "bin", "wintun.dll")},
+	}
+	missing := 0
+	for _, candidate := range candidates {
+		if serviceComponentMissing(candidate.source, candidate.target) {
+			missing++
+		}
+	}
+	if missing == 0 {
+		return nil
+	}
+	for _, candidate := range candidates {
+		if !serviceComponentMissing(candidate.source, candidate.target) {
+			continue
+		}
+		if err := copyFileForService(candidate.source, candidate.target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// serviceComponentMissing reports whether the bundle should be copied. A missing
+// bundle is not an error: tailscale support is optional, and an existing file is
+// explicit runtime state that an installer upgrade must not overwrite.
+func serviceComponentMissing(source, target string) bool {
+	if source == "" || source == target {
+		return false
+	}
+	if _, err := os.Stat(source); err != nil {
+		return false
+	}
+	info, err := os.Stat(target)
+	return err != nil || info.IsDir() || info.Size() == 0
 }
 
 func updateInstalledServiceCore(sourcePath string) error {

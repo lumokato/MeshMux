@@ -62,6 +62,100 @@ func tailscaledExecutable(cfg *config.Config) (string, error) {
 	return exe, nil
 }
 
+func isDefaultTailscaledExecPath(path string) bool {
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	if cleaned == "" || cleaned == "." {
+		return false
+	}
+	return sameExecutablePath(cleaned, filepath.Clean(config.DefaultTailscaledPath()))
+}
+
+// PrepareTailscaleComponents mirrors prepareMihomo for the tailscale trio. The
+// installer ships tailscaled, the CLI and the wintun driver next to its own
+// executable, but the service reads its private data directory, so nothing is
+// reachable until the bundle is copied into the directory the running process
+// actually resolves. Existing files are left untouched: an explicitly updated
+// component is runtime state, exactly like the service-owned mihomo core.
+func PrepareTailscaleComponents(cfg *config.Config) error {
+	if cfg == nil {
+		return errors.New("config is required")
+	}
+	if !cfg.Tailscale.Enabled {
+		return nil
+	}
+	target := strings.TrimSpace(cfg.Components.Tailscale.Path)
+	if target == "" {
+		target = config.DefaultTailscaledPath()
+	}
+	if !isDefaultTailscaledExecPath(target) {
+		// A custom path is an explicit operator choice; never seed it from the bundle.
+		return nil
+	}
+	dir := filepath.Dir(target)
+	cliTarget := filepath.Join(dir, filepath.Base(config.DefaultTailscaleCLIPath()))
+	candidates := []struct {
+		source  string
+		target  string
+		minSize int64
+	}{
+		{config.BundledTailscaledPath(), target, 1 << 20},
+		{config.BundledTailscaleCLIPath(), cliTarget, 1 << 20},
+		{config.BundledWintunPath(), filepath.Join(dir, "wintun.dll"), 0},
+	}
+	var missing []string
+	for _, candidate := range candidates {
+		if candidate.source == "" || candidate.source == candidate.target {
+			continue
+		}
+		if !fileLooksUsable(candidate.source, candidate.minSize) {
+			continue
+		}
+		if fileLooksUsable(candidate.target, candidate.minSize) {
+			continue
+		}
+		missing = append(missing, filepath.Base(candidate.target))
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	for _, candidate := range candidates {
+		if candidate.source == "" || candidate.source == candidate.target {
+			continue
+		}
+		if !fileLooksUsable(candidate.source, candidate.minSize) || fileLooksUsable(candidate.target, candidate.minSize) {
+			continue
+		}
+		if err := copyBundledFile(candidate.source, candidate.target); err != nil {
+			return fmt.Errorf("同步内置 tailscale 组件失败 (%s): %w", filepath.Base(candidate.target), err)
+		}
+	}
+	appendRunnerLog("已同步安装包内置 tailscale 组件到 %s (%s)", dir, strings.Join(missing, ", "))
+	return nil
+}
+
+// EnsureWintunBeside seeds the TUN driver next to a core when the installer did
+// not leave one there. mihomo and tailscaled both load wintun from the
+// directory of their own executable, so a copied core without the DLL silently
+// loses TUN support.
+func EnsureWintunBeside(execPath string) {
+	if runtime.GOOS != "windows" || strings.TrimSpace(execPath) == "" {
+		return
+	}
+	source := config.BundledWintunPath()
+	target := filepath.Join(filepath.Dir(execPath), "wintun.dll")
+	if source == "" || source == target {
+		return
+	}
+	if !fileLooksUsable(source, 0) || fileLooksUsable(target, 0) {
+		return
+	}
+	if err := copyBundledFile(source, target); err != nil {
+		appendRunnerLog("同步 wintun.dll 到 %s 失败: %v", filepath.Dir(execPath), err)
+		return
+	}
+	appendRunnerLog("已同步安装包内置 wintun.dll 到 %s", filepath.Dir(execPath))
+}
+
 func tailscaledCommand(cfg *config.Config) (*exec.Cmd, error) {
 	exe, err := tailscaledExecutable(cfg)
 	if err != nil {
@@ -85,6 +179,9 @@ func tailscaledCommand(cfg *config.Config) (*exec.Cmd, error) {
 func TailscaleSupervision(ctx context.Context, cfg *config.Config) error {
 	if cfg == nil {
 		return errors.New("config is required")
+	}
+	if err := PrepareTailscaleComponents(cfg); err != nil {
+		return err
 	}
 	cmd, err := tailscaledCommand(cfg)
 	if err != nil {

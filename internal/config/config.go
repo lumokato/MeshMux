@@ -561,6 +561,10 @@ func DefaultTailscaleCLIPathFor(goos string) string {
 	return filepath.Join("bin", name)
 }
 
+func DefaultTailscaleCLIPath() string {
+	return DefaultTailscaleCLIPathFor(runtime.GOOS)
+}
+
 func DefaultTailscaleAssetPatternFor(goos string) string {
 	switch goos {
 	case "linux":

@@ -40,6 +40,12 @@ func run(args []string) error {
 		usage()
 		return nil
 	}
+	// Configuration that a mihomo profile cannot express is reported instead of
+	// being dropped silently during generation.
+	generator.Warn = func(message string) {
+		fmt.Fprintln(os.Stderr, "warning:", message)
+		_ = runner.AppendDiagnosticLog(filepath.Join("logs", "meshmux.log"), message)
+	}
 	switch args[0] {
 	case "_service":
 		return runWindowsService(args[1:])

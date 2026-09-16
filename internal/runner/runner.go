@@ -275,6 +275,11 @@ func stopManaged(cfg *config.Config) error {
 		return errors.New("config is required")
 	}
 	ports := mihomoPorts(cfg)
+	// A leftover core from another MeshMux location keeps the ports busy and
+	// makes the owned core exit on every start. Reclaim first, then stop.
+	if err := reclaimForeignCores(cfg); err != nil {
+		appendRunnerLog("回收遗留 mihomo 实例: %v", err)
+	}
 	deadline := time.Now().Add(stopProcessTimeout)
 	var lastKillErr error
 	var quietSince time.Time
@@ -508,6 +513,9 @@ func prepareMihomo(cfg *config.Config, syncBundled bool) (string, error) {
 			return "", fmt.Errorf("mihomo not found at %s and bundled copy is unavailable: %w", target, copyErr)
 		}
 	}
+	// The TUN driver must accompany every core copy; a relocated core without it
+	// silently loses TUN support.
+	EnsureWintunBeside(target)
 	return target, nil
 }
 

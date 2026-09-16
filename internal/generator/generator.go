@@ -20,6 +20,12 @@ import (
 
 var errMissingProvider = errors.New("missing daily proxy provider")
 
+// Warn reports configuration that a mihomo profile cannot express. It defaults
+// to a no-op so library callers are not forced to wire logging; the CLI points
+// it at stderr and the diagnostic log. Without it, enabled features silently
+// disappear from the generated profile.
+var Warn = func(string) {}
+
 func GenerateAll(cfg *config.Config) ([]string, error) {
 	var written []string
 	for _, target := range cfg.Targets {
@@ -214,6 +220,12 @@ func normalizeProviderData(data []byte) ([]byte, error) {
 func Render(cfg *config.Config, target config.Target) (string, error) {
 	if err := cfg.Validate(); err != nil {
 		return "", err
+	}
+	// Tailnet membership, routes and DNS belong to the supervised tailscaled
+	// daemon; mihomo profiles have no representation for them. Say so instead of
+	// dropping the section without a trace.
+	if cfg.Tailscale.Enabled {
+		Warn("tailscale: 已启用，但 tailnet 成员/路由由 tailscaled 守护进程承担，不会写入 mihomo profile；该守护进程需要运行时 bin 目录中存在内置或已下载的 tailscaled/tailscale 组件")
 	}
 	var b strings.Builder
 	wgConfigs, err := loadWGConfigs(cfg.WireGuard.Configs)
