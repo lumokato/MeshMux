@@ -11,6 +11,8 @@ on:
         required: true
         default: "0.3.7"
   push:
+    branches:
+      - dev
     tags:
       - "v*"
 
