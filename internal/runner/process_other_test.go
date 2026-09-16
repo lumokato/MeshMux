@@ -31,8 +31,8 @@ func TestNativeProcessSystemFindsListeningProcess(t *testing.T) {
 }
 
 func TestControllerPortIPv6(t *testing.T) {
-	if got := controllerPort("[::1]:9088"); got != 9088 {
-		t.Fatalf("controllerPort = %d, want %s", got, strconv.Itoa(9088))
+	if got := portFromAddress("[::1]:9088"); got != 9088 {
+		t.Fatalf("portFromAddress = %d, want %s", got, strconv.Itoa(9088))
 	}
 }
 

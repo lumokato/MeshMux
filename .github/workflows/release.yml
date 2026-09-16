@@ -23,7 +23,6 @@ env:
   INPUT_VERSION: ${{ inputs.version }}
   DASHBOARD_VERSION: v1.273.0
   DASHBOARD_SHA256: 076e05d2e3dc6641a0ec281aa4b97a18193fbcc379d139762c32d90adb22793c
-  GEOIP_SHA256: 185CB54663CBC89D5325D5249AFDAE99DEF292A0EDD10539F8A05218A896602F
   DEVELOPMENT_VERSION: 0.3.7
   # Upstream mihomo assets, hashed from
   #   https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.30
@@ -203,7 +202,20 @@ jobs:
             --output "$bundle/bin/geoip.metadb" \
             "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb"
 
-          echo "${GEOIP_SHA256}  $bundle/bin/geoip.metadb" | sha256sum --check --strict
+          # geoip.metadb is a rolling asset: verify against the digest the
+          # upstream release itself publishes instead of a pinned value.
+          expected_geoip="$(curl --fail --location --retry 3 -s \
+            "https://api.github.com/repos/MetaCubeX/meta-rules-dat/releases/latest" \
+            | jq -r '.assets[] | select(.name=="geoip.metadb") | .digest' | sed 's/^sha256://')"
+          if [[ -z "$expected_geoip" ]]; then
+            echo "upstream did not publish a digest for geoip.metadb" >&2
+            exit 1
+          fi
+          actual_geoip="$(sha256sum "$bundle/bin/geoip.metadb" | cut -d' ' -f1)"
+          if [[ "$actual_geoip" != "$expected_geoip" ]]; then
+            echo "GeoIP digest mismatch: downloaded $actual_geoip, upstream published $expected_geoip" >&2
+            exit 1
+          fi
           jq --arg version "$DASHBOARD_VERSION" --arg sha "$DASHBOARD_SHA256" \
             '.components.dashboard = {repo:"MetaCubeX/metacubexd",releaseTag:$version,assetPattern:"compressed-dist\\.tgz$",path:"dashboard",sha256:$sha}' \
             templates/meshmux.example.json > "$components/meshmux.local.json"
@@ -303,7 +315,14 @@ jobs:
             -Uri "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb" `
             -OutFile $geoip `
             -UseBasicParsing
-          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $geoip).Hash -ne $env:GEOIP_SHA256) { throw "GeoIP checksum mismatch" }
+          # geoip.metadb is a rolling asset: verify against the digest the
+          # upstream release itself publishes instead of a pinned value.
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/MetaCubeX/meta-rules-dat/releases/latest"
+          $geoipAsset = $release.assets | Where-Object { $_.name -eq "geoip.metadb" }
+          if (-not $geoipAsset -or -not $geoipAsset.digest) { throw "upstream did not publish a digest for geoip.metadb" }
+          $expectedGeoip = $geoipAsset.digest -replace "^sha256:", ""
+          $actualGeoip = (Get-FileHash -Algorithm SHA256 -LiteralPath $geoip).Hash.ToLowerInvariant()
+          if ($actualGeoip -ne $expectedGeoip) { throw "GeoIP digest mismatch: downloaded $actualGeoip, upstream published $expectedGeoip" }
           Copy-Item $geoip "$repo\build\bin\geoip.metadb" -Force
 
           $config = Get-Content -LiteralPath "$repo\templates\meshmux.example.json" -Raw | ConvertFrom-Json -AsHashtable
