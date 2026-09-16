@@ -23,22 +23,21 @@ env:
   DASHBOARD_SHA256: 076e05d2e3dc6641a0ec281aa4b97a18193fbcc379d139762c32d90adb22793c
   GEOIP_SHA256: 185CB54663CBC89D5325D5249AFDAE99DEF292A0EDD10539F8A05218A896602F
   DEVELOPMENT_VERSION: 0.3.6
-  # Upstream mihomo. Record the exact asset hashes before publishing: download
-  # the assets once, hash them, and fill the values in. The build fails on
-  # purpose while they are empty rather than skipping checksum verification.
+  # Upstream mihomo assets, hashed from
   #   https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.30
+  # When bumping the version, re-hash the new assets and update these values.
   MIHOMO_UPSTREAM_VERSION: v1.19.30
-  MIHOMO_UPSTREAM_WINDOWS_SHA256: ""
-  MIHOMO_UPSTREAM_LINUX_SHA256: ""
+  MIHOMO_UPSTREAM_WINDOWS_SHA256: 289FDE5E29D37A5B3326480590D8B3551C5BF7F8737290355C19BCE74D57A563
+  MIHOMO_UPSTREAM_LINUX_SHA256: DB214C7A2517E63C150D123178D16D102E03A241CCDAE4E5E07FFBE9CF56C6F9
   # Upstream tailscale rebuild: built from the official tag with no source
   # changes (see THIRD_PARTY_NOTICES.md). Upstream does not publish raw
   # tailscaled binaries for Windows and macOS, so MeshMux builds its own from
   # the same commit and records the version here.
   TAILSCALE_VERSION: v1.102.4
   WINTUN_VERSION: "0.14.1"
-  # From https://www.wintun.net/ (build zip SHA-256). Required for the
-  # windows tailscaled archive; empty means the build fails.
-  WINTUN_SHA256: ""
+  # From https://www.wintun.net/ (build zip SHA-256); required for the windows
+  # tailscaled archive. Re-hash when bumping WINTUN_VERSION.
+  WINTUN_SHA256: 07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF51
 
 jobs:
   tailscale-components:
