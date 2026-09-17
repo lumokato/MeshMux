@@ -21,7 +21,7 @@ func TestIndexHTMLIsChineseFormUI(t *testing.T) {
 	if !strings.Contains(html, "let mode = 'tun';") {
 		t.Fatal("new configuration UI does not default to TUN")
 	}
-	for _, want := range []string{"快速设置", "Sub-Store 地址", "后端名", "生成并上传手机配置", "导入 WireGuard 配置", "multiple", "状态概览"} {
+	for _, want := range []string{"快速设置", "Sub-Store 地址", "后端名", "导入 .conf", "multiple", "状态概览"} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("rendered HTML missing %q", want)
 		}

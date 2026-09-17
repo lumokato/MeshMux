@@ -3,171 +3,317 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MeshMux</title>
+  <title>MeshMux 控制台</title>
   <style>
-    :root { color-scheme: light dark; font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif; --bg:#f6f7f9; --panel:#fff; --text:#18202a; --muted:#667085; --line:#d9dee7; --accent:#2563eb; --ok:#15803d; --warn:#b45309; --danger:#b91c1c; --soft:#eef2f7; }
-    @media (prefers-color-scheme: dark) { :root { --bg:#101316; --panel:#171b20; --text:#eef2f6; --muted:#9aa4b2; --line:#2a3038; --accent:#60a5fa; --ok:#4ade80; --warn:#f59e0b; --danger:#f87171; } }
+    :root {
+      color-scheme: light dark;
+      font-family: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+      --bg:#f4f6f9; --panel:#ffffff; --text:#1a2333; --muted:#64748b; --line:#e3e8ef;
+      --accent:#3b82f6; --ok:#16a34a; --warn:#d97706; --danger:#dc2626; --soft:#f1f5f9; --violet:#8b5cf6;
+      --shadow-sm: 0 1px 2px rgba(16,24,40,.05);
+      --shadow-lg: 0 12px 32px -8px rgba(16,24,40,.18), 0 2px 6px rgba(16,24,40,.08);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg:#0f1216; --panel:#171b21; --text:#e7ecf3; --muted:#8b95a6; --line:#28303b;
+        --accent:#60a5fa; --ok:#4ade80; --warn:#fbbf24; --danger:#f87171; --soft:#1d232c; --violet:#a78bfa;
+        --shadow-sm: 0 1px 2px rgba(0,0,0,.35);
+        --shadow-lg: 0 12px 32px -8px rgba(0,0,0,.55), 0 2px 6px rgba(0,0,0,.35);
+      }
+    }
     * { box-sizing: border-box; }
     body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font-size:14px; -webkit-font-smoothing:antialiased; text-rendering:geometricPrecision; }
-    .shell { min-height:100vh; display:grid; grid-template-columns:230px minmax(0,1fr); }
-    aside { border-right:1px solid var(--line); background:var(--panel); padding:18px 14px; display:flex; flex-direction:column; gap:16px; }
-    .brand { display:flex; align-items:center; gap:10px; padding:4px 6px 12px; border-bottom:1px solid var(--line); }
-    .mark { width:30px; height:30px; border-radius:7px; background:var(--accent); color:white; display:grid; place-items:center; font-weight:800; }
-    .brand strong { font-size:17px; }
-    nav { display:grid; gap:6px; }
-    nav button { justify-content:flex-start; border:0; background:transparent; color:var(--text); }
-    nav button.active { background:color-mix(in srgb, var(--accent) 13%, transparent); color:var(--accent); }
-    main { padding:22px; display:grid; gap:16px; align-content:start; max-width:1120px; width:100%; }
-    header { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; }
-    h1 { margin:0; font-size:24px; line-height:1.2; }
-    .sub { color:var(--muted); margin-top:6px; }
-    .path { color:var(--muted); font-size:12px; text-align:right; overflow-wrap:anywhere; max-width:430px; }
+    ::-webkit-scrollbar { width:10px; height:10px; }
+    ::-webkit-scrollbar-thumb { background:var(--line); border-radius:8px; border:2px solid transparent; background-clip:content-box; }
+    ::-webkit-scrollbar-track { background:transparent; }
+
+    .shell { min-height:100vh; display:grid; grid-template-columns:236px minmax(0,1fr); }
+    aside { border-right:1px solid var(--line); background:var(--panel); padding:20px 14px 16px; display:flex; flex-direction:column; gap:18px; position:sticky; top:0; height:100vh; }
+    .brand { display:flex; align-items:center; gap:11px; padding:2px 6px 16px; border-bottom:1px solid var(--line); }
+    .mark { width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg, var(--accent), var(--violet)); color:white; display:grid; place-items:center; font-weight:800; font-size:16px; box-shadow:0 4px 10px -2px color-mix(in srgb, var(--accent) 45%, transparent); flex:none; }
+    .brand strong { font-size:17px; letter-spacing:-.01em; }
+    .brand .hint { margin-top:1px; }
+    nav { display:grid; gap:4px; }
+    nav button { justify-content:flex-start; border:0; background:transparent; color:var(--muted); font-weight:500; border-radius:10px; padding:9px 12px; min-height:38px; }
+    nav button svg { width:16px; height:16px; flex:none; opacity:.9; }
+    nav button:hover { background:var(--soft); color:var(--text); border-color:transparent; }
+    nav button.active { background:color-mix(in srgb, var(--accent) 13%, transparent); color:var(--accent); font-weight:600; }
+
+    main { padding:26px 30px 40px; display:grid; gap:18px; align-content:start; max-width:1120px; width:100%; }
+    header { display:flex; justify-content:space-between; gap:16px; align-items:center; }
+    h1 { margin:0; font-size:23px; line-height:1.25; letter-spacing:-.02em; }
+    .path { color:var(--muted); font-size:12px; overflow-wrap:anywhere; max-width:430px; background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:5px 10px; font-family:ui-monospace, Consolas, monospace; }
+
     section { display:none; gap:16px; }
-    section.active { display:grid; }
-    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; display:grid; gap:14px; }
-    .panel h2 { margin:0; font-size:16px; }
-    .grid { display:grid; grid-template-columns:repeat(2,minmax(240px,1fr)); gap:12px; }
-    label { display:grid; gap:6px; font-weight:600; }
-    label span, .hint { color:var(--muted); font-size:12px; font-weight:400; }
-    input, textarea, select { width:100%; min-height:36px; border:1px solid var(--line); border-radius:7px; background:Canvas; color:CanvasText; padding:8px 10px; font:inherit; }
-    textarea { min-height:220px; font-family:Consolas, ui-monospace, monospace; line-height:1.45; }
-    .switch { display:flex; align-items:center; gap:10px; font-weight:600; }
-    .switch input { width:18px; min-height:18px; }
-    .seg { display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; width:max-content; }
-    .seg button { border:0; border-radius:0; background:transparent; min-width:108px; }
-    .seg button.active { background:var(--accent); color:white; }
+    section.active { display:grid; animation:fadeIn .18s ease; }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; display:grid; gap:14px; box-shadow:var(--shadow-sm); }
+    .panel-head { display:flex; gap:12px; align-items:center; }
+    .panel-head h2 { margin:0; font-size:15px; font-weight:600; }
+    .chip { width:34px; height:34px; border-radius:10px; display:grid; place-items:center; flex:none; }
+    .chip svg { width:16px; height:16px; }
+    .chip.blue { background:color-mix(in srgb, var(--accent) 12%, transparent); color:var(--accent); }
+    .chip.green { background:color-mix(in srgb, var(--ok) 13%, transparent); color:var(--ok); }
+    .chip.violet { background:color-mix(in srgb, var(--violet) 13%, transparent); color:var(--violet); }
+    .chip.amber { background:color-mix(in srgb, var(--warn) 14%, transparent); color:var(--warn); }
+
+    .stateline { display:flex; align-items:center; gap:9px; min-height:24px; color:var(--muted); font-size:13px; font-weight:500; flex-wrap:wrap; }
+    .stateline::before { content:''; width:8px; height:8px; border-radius:50%; background:var(--muted); box-shadow:0 0 0 3px color-mix(in srgb, var(--muted) 18%, transparent); flex:none; }
+    .stateline.ok { color:var(--text); }
+    .stateline.ok::before { background:var(--ok); box-shadow:0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+    .stateline.warn { color:var(--text); }
+    .stateline.warn::before { background:var(--warn); box-shadow:0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent); }
+    .stateline.err { color:var(--text); }
+    .stateline.err::before { background:var(--danger); box-shadow:0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent); }
+    .stateline .detail { color:var(--muted); font-weight:400; font-size:12px; overflow-wrap:anywhere; }
+
+    .wglist { display:grid; gap:6px; }
+    .wgrow { display:flex; align-items:center; gap:9px; padding:8px 12px; border:1px solid var(--line); border-radius:9px; background:var(--soft); font-size:13px; font-family:ui-monospace, Consolas, monospace; overflow-wrap:anywhere; }
+    .wgrow svg { width:14px; height:14px; color:var(--ok); flex:none; }
+
+    .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px,1fr)); gap:14px; }
+    label { display:grid; gap:7px; font-weight:600; font-size:13px; }
+
+    input, textarea, select { width:100%; min-height:38px; border:1px solid var(--line); border-radius:9px; background:var(--panel); color:var(--text); padding:9px 12px; font:inherit; transition:border-color .15s, box-shadow .15s; }
+    input:hover, textarea:hover, select:hover { border-color:color-mix(in srgb, var(--accent) 38%, var(--line)); }
+    input:focus, textarea:focus, select:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+    textarea { min-height:230px; font-family:ui-monospace, Consolas, monospace; line-height:1.5; font-size:13px; }
+
+    .switch { display:flex; align-items:center; gap:10px; font-weight:500; font-size:13px; cursor:pointer; }
+    .switch input { appearance:none; -webkit-appearance:none; width:38px; min-height:22px; height:22px; border:0; border-radius:999px; background:var(--line); position:relative; cursor:pointer; transition:background .2s; margin:0; padding:0; flex:none; }
+    .switch input::after { content:''; position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.3); transition:left .2s; }
+    .switch input:checked { background:var(--accent); }
+    .switch input:checked::after { left:18px; }
+    .switch input:focus { box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+
+    .seg { display:inline-flex; background:var(--soft); border:1px solid var(--line); border-radius:11px; padding:4px; gap:4px; width:max-content; }
+    .seg button { border:0; background:transparent; border-radius:8px; min-height:34px; padding:7px 18px; color:var(--muted); font-weight:500; }
+    .seg button:hover { background:transparent; border-color:transparent; color:var(--text); }
+    .seg button.active { background:var(--accent); color:#fff; font-weight:600; box-shadow:0 1px 4px color-mix(in srgb, var(--accent) 40%, transparent); }
+
     .actions { display:flex; flex-wrap:wrap; gap:8px; }
-    button { min-height:34px; border:1px solid var(--line); border-radius:7px; background:var(--panel); color:var(--text); padding:8px 12px; cursor:pointer; font:inherit; display:inline-flex; align-items:center; justify-content:center; gap:7px; }
-    button.primary { background:var(--accent); color:white; border-color:var(--accent); }
-    button:hover { border-color:var(--accent); }
-    .notice { border:1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); background:color-mix(in srgb, var(--warn) 10%, var(--panel)); border-radius:8px; padding:10px 12px; color:var(--text); display:none; }
-    .notice.show { display:block; }
-    .status { white-space:pre-wrap; min-height:46px; border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:12px; color:var(--muted); }
-    .status.ok { color:var(--ok); }
-    .status.err { color:var(--danger); }
-    .cards { display:grid; grid-template-columns:repeat(3,minmax(170px,1fr)); gap:10px; }
-    .metric { border:1px solid var(--line); border-radius:8px; padding:12px; background:var(--panel); display:grid; gap:5px; min-height:92px; }
-    .metric .label { color:var(--muted); font-size:12px; }
-    .metric .value { font-size:18px; font-weight:700; }
+    button { min-height:36px; border:1px solid var(--line); border-radius:9px; background:var(--panel); color:var(--text); padding:8px 14px; cursor:pointer; font:inherit; font-weight:500; display:inline-flex; align-items:center; justify-content:center; gap:7px; transition:border-color .15s, background .15s, color .15s, box-shadow .15s, transform .05s; }
+    button svg { width:14px; height:14px; flex:none; }
+    button:hover { border-color:var(--accent); color:var(--accent); background:color-mix(in srgb, var(--accent) 5%, var(--panel)); }
+    button:active { transform:translateY(1px); }
+    button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    button.primary { background:var(--accent); color:#fff; border-color:var(--accent); box-shadow:0 1px 2px color-mix(in srgb, var(--accent) 35%, transparent); }
+    button.primary:hover { background:color-mix(in srgb, var(--accent) 88%, #000); border-color:color-mix(in srgb, var(--accent) 88%, #000); color:#fff; }
+
+    .overlay { position:fixed; inset:0; z-index:100; display:none; align-items:flex-start; justify-content:center; padding:9vh 16px 16px; background:color-mix(in srgb, #000 45%, transparent); }
+    .overlay.show { display:flex; animation:fadeIn .15s ease; }
+    .modal { width:100%; max-width:460px; background:var(--panel); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow-lg); padding:22px; display:grid; gap:16px; }
+    .modal-head { display:flex; align-items:center; gap:12px; }
+    .modal-head h3 { margin:0; font-size:15px; font-weight:600; flex:1; }
+    .modal-head .chip { width:30px; height:30px; border-radius:9px; }
+    .modal-close { border:0; background:transparent; color:var(--muted); min-height:30px; width:30px; padding:0; border-radius:8px; }
+    .modal-close:hover { background:var(--soft); color:var(--text); border-color:transparent; }
+    .modal-foot { display:flex; justify-content:flex-end; gap:8px; }
+
+    .status { position:fixed; right:24px; bottom:24px; z-index:200; display:flex; align-items:center; gap:10px; max-width:min(540px, calc(100vw - 48px)); padding:12px 18px 12px 14px; border-radius:12px; background:var(--panel); border:1px solid var(--line); box-shadow:var(--shadow-lg); color:var(--muted); font-size:13px; overflow-wrap:anywhere; white-space:pre-wrap; }
+    .status::before { content:''; width:8px; height:8px; border-radius:50%; background:var(--muted); box-shadow:0 0 0 3px color-mix(in srgb, var(--muted) 22%, transparent); flex:none; }
+    .status.ok { color:var(--text); border-color:color-mix(in srgb, var(--ok) 32%, var(--line)); }
+    .status.ok::before { background:var(--ok); box-shadow:0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+    .status.err { color:var(--text); border-color:color-mix(in srgb, var(--danger) 38%, var(--line)); }
+    .status.err::before { background:var(--danger); box-shadow:0 0 0 3px color-mix(in srgb, var(--danger) 22%, transparent); }
+
+    .cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px,1fr)); gap:12px; }
+    .metric { position:relative; border:1px solid var(--line); border-radius:12px; padding:14px 16px 14px 19px; background:var(--panel); display:grid; gap:4px; min-height:96px; box-shadow:var(--shadow-sm); overflow:hidden; transition:border-color .15s; align-content:start; }
+    .metric::before { content:''; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--muted); opacity:.45; }
+    .metric .label { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; font-weight:500; }
+    .metric .label::before { content:''; width:6px; height:6px; border-radius:50%; background:var(--muted); flex:none; }
+    .metric .value { font-size:20px; font-weight:700; letter-spacing:-.01em; }
     .metric .detail { color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
-    .metric.ok { border-color:color-mix(in srgb, var(--ok) 35%, var(--line)); }
-    .metric.warn { border-color:color-mix(in srgb, var(--warn) 45%, var(--line)); }
-    .metric.err { border-color:color-mix(in srgb, var(--danger) 45%, var(--line)); }
+    .metric.ok { border-color:color-mix(in srgb, var(--ok) 26%, var(--line)); background:color-mix(in srgb, var(--ok) 4%, var(--panel)); }
+    .metric.ok::before { background:var(--ok); opacity:1; }
+    .metric.ok .label::before { background:var(--ok); }
+    .metric.warn { border-color:color-mix(in srgb, var(--warn) 32%, var(--line)); background:color-mix(in srgb, var(--warn) 5%, var(--panel)); }
+    .metric.warn::before { background:var(--warn); opacity:1; }
+    .metric.warn .label::before { background:var(--warn); }
+    .metric.err { border-color:color-mix(in srgb, var(--danger) 32%, var(--line)); background:color-mix(in srgb, var(--danger) 5%, var(--panel)); }
+    .metric.err::before { background:var(--danger); opacity:1; }
+    .metric.err .label::before { background:var(--danger); }
+
     .loglist { display:grid; gap:8px; }
-    .logline { border:1px solid var(--line); border-radius:8px; padding:9px 10px; color:var(--muted); overflow-wrap:anywhere; font-family:Consolas, ui-monospace, monospace; font-size:12px; line-height:1.45; }
+    .logline { border-radius:9px; padding:9px 13px; color:var(--muted); background:var(--soft); border:1px solid transparent; overflow-wrap:anywhere; font-family:ui-monospace, Consolas, monospace; font-size:12px; line-height:1.5; }
     .compact { display:grid; gap:10px; }
     .hidden { display:none !important; }
-    @media (max-width:900px) { .cards { grid-template-columns:repeat(2,minmax(150px,1fr)); } }
-    @media (max-width:800px) { .shell { grid-template-columns:1fr; } aside { border-right:0; border-bottom:1px solid var(--line); } nav { grid-template-columns:repeat(3,1fr); } main { padding:14px; } header { display:grid; } .path { text-align:left; } .grid { grid-template-columns:1fr; } .cards { grid-template-columns:1fr; } }
+    input[data-hidden] { display:none !important; }
+
+    @media (max-width:800px) {
+      .shell { grid-template-columns:1fr; }
+      aside { position:static; height:auto; border-right:0; border-bottom:1px solid var(--line); }
+      nav { grid-template-columns:repeat(3,1fr); }
+      main { padding:16px 14px 32px; }
+      header { display:grid; }
+      .path { max-width:none; }
+      .grid { grid-template-columns:1fr; }
+      .status { left:12px; right:12px; bottom:12px; max-width:none; }
+    }
   </style>
 </head>
 <body>
   <div class="shell">
     <aside>
-      <div class="brand"><div class="mark">M</div><div><strong>MeshMux</strong><div class="hint">mihomo runner</div></div></div>
+      <div class="brand"><div class="mark">M</div><div><strong>MeshMux</strong><div class="hint">mihomo 管理面板</div></div></div>
       <nav>
-        <button class="active" data-tab="quick" onclick="showTab('quick')">快速设置</button>
-        <button data-tab="advanced" onclick="showTab('advanced')">高级</button>
-        <button data-tab="status" onclick="showTab('status')">状态</button>
+        <button class="active" data-tab="quick" onclick="showTab('quick')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>快速设置</button>
+        <button data-tab="advanced" onclick="showTab('advanced')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>高级</button>
+        <button data-tab="status" onclick="showTab('status')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>状态</button>
       </nav>
     </aside>
     <main>
       <header>
-        <div><h1>快速设置</h1><div class="sub">只填写首次运行必须的信息，其他配置由 MeshMux 生成。</div></div>
+        <h1 id="pageTitle">快速设置</h1>
         <div id="path" class="path"></div>
       </header>
 
       <section id="tab-quick" class="active">
         <div class="panel">
-          <h2>订阅与手机同步</h2>
-          <div class="grid">
-            <label>日常代理订阅链接
-              <input id="providerUrl" placeholder="https://sub-store/download/collection/...">
-              <button type="button" onclick="saveThen('refresh-providers')">更新订阅</button>
-              <span>用于生成{{SUBSCRIPTION_SCOPE}}的 mihomo 配置。</span>
-            </label>
-            <label>Sub-Store 地址
-              <input id="subStoreUrl" placeholder="https://substore.example/">
-              <span>站点根地址。</span>
-            </label>
-            <label>后端名
-              <input id="subStoreBackend" placeholder="backend">
-            </label>
+          <div class="panel-head">
+            <span class="chip blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
+            <h2>订阅</h2>
           </div>
-          <label class="switch"><input id="allowDirectOnly" type="checkbox">仅直连模式（不使用日常代理订阅）</label>
+          <div id="subStatus" class="stateline">加载中...</div>
           <div class="actions">
-            <button class="primary" onclick="saveQuick()">保存</button>
+            <button onclick="openModal('modalSub')">订阅配置</button>
+            <button onclick="saveThen('refresh-providers')">更新订阅</button>
             <button onclick="saveThen('probe-substore')">验证 Sub-Store</button>
-            <button onclick="saveThen('publish-mobile')">生成并上传手机配置</button>
           </div>
         </div>
 
         <div class="panel">
-          <h2>WireGuard</h2>
-          <div class="grid">
-            <label>WireGuard .conf
-              <input id="wgFile" type="file" accept=".conf,text/plain" multiple>
-              <span id="wgSummary">未导入配置</span>
-            </label>
+          <div class="panel-head">
+            <span class="chip violet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
+            <h2>Tailscale</h2>
           </div>
+          <div id="tsStatus" class="stateline">加载中...</div>
           <div class="actions">
-            <button onclick="importWireGuard()">导入 WireGuard 配置</button>
+            <button id="tsConfigBtn" onclick="openModal('modalTailscale')">登记 Tailscale</button>
           </div>
         </div>
 
         <div class="panel">
-          <h2>{{RUNTIME_TITLE}}</h2>
-          <div class="seg">
-            <button id="modeProxy" onclick="setMode('proxy')">{{PROXY_MODE_LABEL}}</button>
-            <button id="modeTun" onclick="setMode('tun')">TUN</button>
+          <div class="panel-head">
+            <span class="chip green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>
+            <h2>WireGuard</h2>
           </div>
+          <div id="wgList" class="wglist"></div>
           <div class="actions">
-            <button onclick="runAction('download-mihomo')">下载/更新 mihomo</button>
-            <button onclick="runAction('download-dashboard')">下载/更新 MetaCubeXD</button>
-            <button class="primary" {{RUNTIME_ACTION_HIDDEN}} onclick="saveThen('start',runtimeTarget)">启动核心</button>
-            <button {{RUNTIME_ACTION_HIDDEN}} onclick="runAction('stop')">停止核心</button>
-            <button class="{{SYSTEM_PROXY_CLASS}}" onclick="runAction('proxy-on')">系统代理开</button>
-            <button class="{{SYSTEM_PROXY_CLASS}}" onclick="runAction('proxy-off')">系统代理关</button>
+            <input id="wgFile" type="file" accept=".conf,text/plain" multiple data-hidden onchange="importWireGuard()">
+            <button onclick="el('wgFile').click()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>导入 .conf</button>
           </div>
         </div>
       </section>
 
       <section id="tab-advanced">
         <div class="panel">
-          <h2>高级选项</h2>
+          <div class="panel-head">
+            <span class="chip violet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg></span>
+            <h2>{{RUNTIME_TITLE}}</h2>
+          </div>
+          <div class="seg">
+            <button id="modeProxy" onclick="setMode('proxy')">{{PROXY_MODE_LABEL}}</button>
+            <button id="modeTun" onclick="setMode('tun')">TUN</button>
+          </div>
           <div class="grid">
             <label>混合代理端口<input id="mixedPort" type="number" min="1" max="65535"></label>
             <label>控制器地址<input id="controller"></label>
           </div>
+          <div class="actions">
+            <button class="primary" {{RUNTIME_ACTION_HIDDEN}} onclick="saveThen('start',runtimeTarget)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>启动核心</button>
+            <button {{RUNTIME_ACTION_HIDDEN}} onclick="runAction('stop')">停止核心</button>
+            <button class="{{SYSTEM_PROXY_CLASS}}" onclick="runAction('proxy-on')">系统代理开</button>
+            <button class="{{SYSTEM_PROXY_CLASS}}" onclick="runAction('proxy-off')">系统代理关</button>
+          </div>
+          <div class="actions">
+            <button onclick="runAction('download-mihomo')">下载/更新 mihomo</button>
+            <button onclick="runAction('download-dashboard')">下载/更新 MetaCubeXD</button>
+          </div>
         </div>
         <div class="panel">
-          <h2>配置 JSON</h2>
+          <div class="panel-head">
+            <span class="chip amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></svg></span>
+            <h2>配置 JSON</h2>
+          </div>
           <textarea id="advancedJson" spellcheck="false"></textarea>
           <div class="actions">
             <button onclick="applyJson()">从 JSON 应用</button>
-            <button onclick="saveJson()">保存 JSON</button>
+            <button class="primary" onclick="saveJson()">保存 JSON</button>
           </div>
         </div>
       </section>
 
       <section id="tab-status">
         <div class="panel">
-          <h2>状态概览</h2>
+          <div class="panel-head">
+            <span class="chip green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
+            <h2>状态概览</h2>
+          </div>
           <div id="statusCards" class="cards"></div>
           <div class="actions">
-            <button onclick="refreshStatus()">刷新状态</button>
+            <button class="primary" onclick="refreshStatus()">刷新状态</button>
             <button {{RUNTIME_ACTION_HIDDEN}} onclick="runAction('dashboard')">打开 MetaCubeXD</button>
           </div>
         </div>
         <div class="panel">
-          <h2>最近警告</h2>
+          <div class="panel-head">
+            <span class="chip amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg></span>
+            <h2>最近警告</h2>
+          </div>
           <div id="statusLogs" class="loglist"></div>
         </div>
       </section>
-
-      <div id="status" class="status">正在加载配置...</div>
     </main>
   </div>
+
+  <div id="modalSub" class="overlay" onclick="if(event.target===this)closeModal('modalSub')">
+    <div class="modal">
+      <div class="modal-head">
+        <span class="chip blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
+        <h3>订阅配置</h3>
+        <button class="modal-close" onclick="closeModal('modalSub')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      </div>
+      <label>日常代理订阅链接
+        <input id="providerUrl" placeholder="https://sub-store/download/collection/...">
+      </label>
+      <label>Sub-Store 地址
+        <input id="subStoreUrl" placeholder="https://substore.example/">
+      </label>
+      <label>后端名
+        <input id="subStoreBackend" placeholder="backend">
+      </label>
+      <label class="switch"><input id="allowDirectOnly" type="checkbox">仅直连模式</label>
+      <div class="modal-foot">
+        <button onclick="closeModal('modalSub')">取消</button>
+        <button class="primary" onclick="saveModal('modalSub')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modalTailscale" class="overlay" onclick="if(event.target===this)closeModal('modalTailscale')">
+    <div class="modal">
+      <div class="modal-head">
+        <span class="chip violet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
+        <h3>Tailscale 配置</h3>
+        <button class="modal-close" onclick="closeModal('modalTailscale')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      </div>
+      <label class="switch"><input id="tsEnabled" type="checkbox">启用 Tailscale</label>
+      <label>Auth Key
+        <input id="tsAuthKey" placeholder="tskey-auth-...">
+      </label>
+      <label>主机名
+        <input id="tsHostname" placeholder="windows-meshmux">
+      </label>
+      <div class="modal-foot">
+        <button onclick="closeModal('modalTailscale')">取消</button>
+        <button class="primary" onclick="saveModal('modalTailscale')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="status" class="status">正在加载配置...</div>
   <script>
     const token = new URLSearchParams(location.search).get('token') || '';
     const headers = {'Content-Type':'application/json','X-MeshMux-Token':token};
@@ -181,9 +327,12 @@
     function ok(text){ const s=el('status'); s.className='status ok'; s.textContent=text; }
     function err(text){ const s=el('status'); s.className='status err'; s.textContent=text; }
     function info(text){ const s=el('status'); s.className='status'; s.textContent=text; }
+    function openModal(id){ el(id).classList.add('show'); }
+    function closeModal(id){ el(id).classList.remove('show'); }
+    function saveModal(id){ saveQuick().then(saved => { if (saved) closeModal(id); }); }
     function ensure(c){
       c.name ||= 'default'; c.setup ||= {}; c.ports ||= {}; c.paths ||= {}; c.providers ||= [];
-      c.tun ||= {}; c.dns ||= {}; c.rules ||= {}; c.wireguard ||= {};
+      c.tun ||= {}; c.dns ||= {}; c.rules ||= {}; c.wireguard ||= {}; c.tailscale ||= {};
       c.wireguard.configs ||= [];
       c.components ||= {}; c.components.mihomo ||= {}; c.components.dashboard ||= {};
       c.targets ||= []; c.publish ||= []; return c;
@@ -212,6 +361,7 @@
       el('path').textContent = j.path;
       fill();
       ok('配置已加载');
+      refreshStatus();
     }
     function fill(){
       ensure(cfg); deriveSetup(cfg);
@@ -219,11 +369,14 @@
       el('allowDirectOnly').checked = !!cfg.setup.allowDirectOnly;
       setVal('subStoreUrl', cfg.setup.subStoreUrl || '');
       setVal('subStoreBackend', cfg.setup.subStoreBackend || '');
+      el('tsEnabled').checked = !!cfg.tailscale.enabled;
+      setVal('tsAuthKey', cfg.tailscale.authKey || '');
+      setVal('tsHostname', cfg.tailscale.hostname || '');
       mode = cfg.tun.enabled ? 'tun' : 'proxy';
       setMode(mode);
       setVal('mixedPort', cfg.ports.mixed || 2080);
       setVal('controller', cfg.ports.controller || '127.0.0.1:9090');
-      refreshWireGuardSummary();
+      renderWireGuardList();
       el('advancedJson').value = JSON.stringify(storageConfig(cfg), null, 2);
     }
     function collect(){
@@ -233,6 +386,9 @@
       cfg.setup.subStoreUrl = val('subStoreUrl').replace(/\/+$/, '') + (val('subStoreUrl') ? '/' : '');
       cfg.setup.subStoreBackend = val('subStoreBackend').replace(/^\/+|\/+$/g, '');
       cfg.setup.subStoreFileName ||= (cfg.publish.find(p => p.type === 'substore-files') || {}).fileName || '';
+      cfg.tailscale.enabled = el('tsEnabled').checked;
+      cfg.tailscale.authKey = val('tsAuthKey');
+      if (val('tsHostname')) cfg.tailscale.hostname = val('tsHostname'); else delete cfg.tailscale.hostname;
       cfg.ports.mixed = Number(val('mixedPort')) || 2080;
       cfg.ports.controller = val('controller') || '127.0.0.1:9090';
       cfg.providers = [{name:'main', type:'substore', url:cfg.setup.providerUrl, path:'providers/main.yaml', interval:3600}];
@@ -257,19 +413,28 @@
       el('modeProxy').classList.toggle('active', mode === 'proxy');
       el('modeTun').classList.toggle('active', mode === 'tun');
     }
+    const pageTitle = {quick:'快速设置', advanced:'高级', status:'状态'};
     function showTab(name){
       document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
       document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
       el('tab-' + name).classList.add('active');
+      if (pageTitle[name]) el('pageTitle').textContent = pageTitle[name];
       if (name === 'advanced') el('advancedJson').value = JSON.stringify(storageConfig(collect()), null, 2);
       if (name === 'status') refreshStatus();
     }
+    function renderWireGuardList(){
+      const list = cfg.wireguard?.configs || [];
+      el('wgList').innerHTML = list.length
+        ? list.map(p => '<div class="wgrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>' + escapeHtml(baseName(p)) + '</div>').join('')
+        : '<div class="stateline">未导入配置</div>';
+    }
+    function baseName(p){ return String(p).split(/[\\/]/).pop(); }
     async function saveQuick(){
       try {
         collect();
         const r = await fetch('/api/config?token=' + encodeURIComponent(token), {method:'POST', headers, body:JSON.stringify({config:cfg})});
         const text = await responseText(r);
-        if (!r.ok) return err(text);
+        if (!r.ok) { err(text); return false; }
         el('advancedJson').value = JSON.stringify(storageConfig(cfg), null, 2);
         ok(text || '配置已保存');
         return true;
@@ -281,7 +446,7 @@
     }
     async function importWireGuard(){
       const files = Array.from(el('wgFile').files || []);
-      if (!files.length) return err('请选择 WireGuard .conf 文件');
+      if (!files.length) return;
       if (!await saveQuick()) return;
       try {
         info('正在导入 WireGuard...');
@@ -299,6 +464,7 @@
           cfg = ensure(j.config || cfg);
           imported++;
         }
+        el('wgFile').value = '';
         fill();
         ok('WireGuard 已导入: ' + imported + ' 个配置');
         refreshStatus();
@@ -317,10 +483,6 @@
       try { cfg = ensure(JSON.parse(el('advancedJson').value)); fill(); ok('JSON 已应用'); }
       catch(e) { err('JSON 无效: ' + e.message); }
     }
-    function refreshWireGuardSummary(){
-      const n = (cfg.wireguard?.configs || []).length;
-      el('wgSummary').textContent = n ? (n + ' 个配置已导入') : '未导入配置';
-    }
     async function runAction(action,target){
       info('正在执行...');
       const r = await fetch('/api/action?token=' + encodeURIComponent(token), {method:'POST', headers, body:JSON.stringify({action, target:target || ''})});
@@ -333,7 +495,8 @@
       const text = await r.text();
       if (!r.ok) return err(text);
       const data = JSON.parse(text);
-      el('statusCards').innerHTML = (data.items || []).map(item =>
+      const items = data.items || [];
+      el('statusCards').innerHTML = items.map(item =>
         '<div class="metric ' + escapeHtml(item.state || '') + '">' +
         '<div class="label">' + escapeHtml(item.label) + '</div>' +
         '<div class="value">' + escapeHtml(item.value) + '</div>' +
@@ -343,6 +506,17 @@
       el('statusLogs').innerHTML = (data.logs || []).map(line =>
         '<div class="logline">' + escapeHtml(line) + '</div>'
       ).join('');
+      const sub = items.find(i => i.label === '订阅');
+      const subLine = el('subStatus');
+      subLine.className = 'stateline ' + (sub && sub.state !== 'muted' ? sub.state : '');
+      subLine.textContent = sub ? sub.value : '未知';
+      const ts = items.find(i => i.label === 'Tailnet');
+      const tsLine = el('tsStatus');
+      tsLine.className = 'stateline ' + (ts && ts.state !== 'muted' ? ts.state : '');
+      tsLine.innerHTML = ts ? escapeHtml(ts.value) + (ts.detail ? ' <span class="detail">' + escapeHtml(ts.detail) + '</span>' : '') : '未知';
+      const tsBtn = el('tsConfigBtn');
+      if (ts && ts.state === 'ok') { tsBtn.textContent = '配置'; tsBtn.classList.remove('primary'); }
+      else { tsBtn.textContent = '登记 Tailscale'; tsBtn.classList.add('primary'); }
     }
     async function responseText(r){
       const text = await r.text();
