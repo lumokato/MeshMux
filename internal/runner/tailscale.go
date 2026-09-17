@@ -237,6 +237,11 @@ func TailscaleSupervision(ctx context.Context, cfg *config.Config) error {
 	releaseJob := assignToKillOnCloseJob(cmd.Process.Pid)
 	defer releaseJob()
 	appendRunnerLog("tailscaled 已启动 (PID %d)", cmd.Process.Pid)
+	go func() {
+		if err := tailscaleAutoLogin(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
+			appendRunnerLog("tailscale 自动登录失败: %v", err)
+		}
+	}()
 	return superviseDaemon(ctx, cmd)
 }
 
@@ -387,6 +392,65 @@ func prepareTailscaleAuthKey(cfg *config.Config) (string, func(), error) {
 func fileHasContentRunner(path string) bool {
 	info, err := os.Stat(strings.TrimSpace(path))
 	return err == nil && !info.IsDir() && info.Size() > 0
+}
+
+// TailscaleAuthKeyConfigured reports whether a headless login can complete:
+// without an auth key the "tailscale up" transaction needs an interactive
+// browser session, which the service never has.
+func TailscaleAuthKeyConfigured(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if keyFile := strings.TrimSpace(cfg.Tailscale.AuthKeyFile); keyFile != "" && fileHasContentRunner(keyFile) {
+		return true
+	}
+	return strings.TrimSpace(cfg.Tailscale.AuthKey) != ""
+}
+
+// Test seams for the auto-login flow; production code uses the real functions.
+var (
+	tailscaleStatusFn = TailscaleStatus
+	tailscaleUpFn     = TailscaleUp
+)
+
+// tailscaleAutoLogin performs the deferred login once the daemon is reachable.
+// Restarting only respawns tailscaled, which restores NeedsLogin from its
+// state file until something executes the actual "tailscale up" transaction.
+// With an auth key configured that transaction runs unattended right after
+// the daemon comes up; without one the guard skips and the status card keeps
+// asking the user to act.
+func tailscaleAutoLogin(ctx context.Context, cfg *config.Config) error {
+	if cfg == nil || !cfg.Tailscale.Enabled || !TailscaleAuthKeyConfigured(cfg) {
+		return nil
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		statusCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		status, err := tailscaleStatusFn(statusCtx, cfg)
+		cancel()
+		if err == nil {
+			if status.BackendState == "Running" {
+				return nil
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			return errors.New("tailscaled 未就绪，放弃自动登录")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	if err := tailscaleUpFn(ctx, cfg); err != nil {
+		return err
+	}
+	appendRunnerLog("tailscale 自动登录完成")
+	return nil
 }
 
 // TailscaleUp applies the configured desired state through the tailscale CLI.

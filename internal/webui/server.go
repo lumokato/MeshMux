@@ -219,7 +219,7 @@ func tailscaleStatusItem(cfg *config.Config) statusItem {
 		}
 		return statusItem{Value: "已登录", State: "warn", Detail: detail}
 	case "NeedsLogin":
-		return statusItem{Value: "需要登录", State: "warn", Detail: "运行 meshmux tailscale up 或填入 Auth Key"}
+		return statusItem{Value: "需要登录", State: "warn", Detail: "点击「登录 Tailnet」执行登记（需已配置 Auth Key），或运行 meshmux tailscale up"}
 	default:
 		return statusItem{Value: status.BackendState, State: "warn", Detail: strings.Join(status.Health, "; ")}
 	}
@@ -701,6 +701,22 @@ func (s *Server) actionAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 			return
 		}
 		message = "已打开 MetaCubeXD"
+	case "tailscale-up":
+		if !cfg.Tailscale.Enabled {
+			http.Error(w, "Tailnet 未启用；先在配置里启用 Tailnet 出站", http.StatusBadRequest)
+			return
+		}
+		if !runner.TailscaleAuthKeyConfigured(cfg) {
+			http.Error(w, "未配置 Auth Key：没有 Key 的登录需要浏览器交互，请先在 Tailscale 配置里填写 Auth Key 并保存", http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+		defer cancel()
+		if err := runner.TailscaleUp(ctx, cfg); err != nil {
+			http.Error(w, runner.RedactLogText(err.Error()), http.StatusBadGateway)
+			return
+		}
+		message = "Tailnet 登录已执行；状态稍后刷新"
 	case "download-mihomo":
 		path, err := updater.Download(cfg.Components.Mihomo, "mihomo")
 		if err != nil {

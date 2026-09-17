@@ -191,6 +191,7 @@
           <div id="tsStatus" class="stateline">加载中...</div>
           <div class="actions">
             <button id="tsConfigBtn" onclick="openModal('modalTailscale')">登记 Tailscale</button>
+            <button id="tsLoginBtn" class="hidden primary" onclick="runAction('tailscale-up')">登录 Tailnet</button>
           </div>
         </div>
 
@@ -488,7 +489,7 @@
       const r = await fetch('/api/action?token=' + encodeURIComponent(token), {method:'POST', headers, body:JSON.stringify({action, target:target || ''})});
       const text = await responseText(r);
       if (!r.ok) err(text); else ok(text);
-      if (action === 'start' || action === 'stop' || action === 'proxy-on' || action === 'proxy-off') refreshStatus();
+      if (action === 'start' || action === 'stop' || action === 'proxy-on' || action === 'proxy-off' || action === 'tailscale-up') refreshStatus();
     }
     async function refreshStatus(){
       const r = await fetch('/api/status?token=' + encodeURIComponent(token));
@@ -517,6 +518,9 @@
       const tsBtn = el('tsConfigBtn');
       if (ts && ts.state === 'ok') { tsBtn.textContent = '配置'; tsBtn.classList.remove('primary'); }
       else { tsBtn.textContent = '登记 Tailscale'; tsBtn.classList.add('primary'); }
+      const tsLoginBtn = el('tsLoginBtn');
+      if (ts && ts.value === '需要登录') tsLoginBtn.classList.remove('hidden');
+      else tsLoginBtn.classList.add('hidden');
     }
     async function responseText(r){
       const text = await r.text();

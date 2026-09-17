@@ -1,6 +1,8 @@
 package runner
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -89,5 +91,100 @@ func TestPrepareTailscaleAuthKeyWithoutKeyIsEmpty(t *testing.T) {
 	defer cleanup()
 	if path != "" {
 		t.Fatalf("expected empty key path, got %q", path)
+	}
+}
+
+func TestTailscaleAuthKeyConfigured(t *testing.T) {
+	if TailscaleAuthKeyConfigured(nil) {
+		t.Fatal("nil config must report no key")
+	}
+	cfg := &config.Config{}
+	if TailscaleAuthKeyConfigured(cfg) {
+		t.Fatal("empty config must report no key")
+	}
+	cfg.Tailscale.AuthKey = "tskey-inline"
+	if !TailscaleAuthKeyConfigured(cfg) {
+		t.Fatal("inline key must count as configured")
+	}
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "authkey")
+	if err := os.WriteFile(keyFile, []byte("tskey-from-file\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Tailscale.AuthKey = ""
+	cfg.Tailscale.AuthKeyFile = keyFile
+	if !TailscaleAuthKeyConfigured(cfg) {
+		t.Fatal("existing key file must count as configured")
+	}
+	cfg.Tailscale.AuthKeyFile = filepath.Join(dir, "missing")
+	if TailscaleAuthKeyConfigured(cfg) {
+		t.Fatal("missing key file must not count as configured")
+	}
+}
+
+func TestTailscaleAutoLoginSkipsWithoutKeyOrDisabled(t *testing.T) {
+	ctx := context.Background()
+	enabledWithoutKey := &config.Config{}
+	enabledWithoutKey.Tailscale.Enabled = true
+	if err := tailscaleAutoLogin(ctx, enabledWithoutKey); err != nil {
+		t.Fatalf("no key: auto login must skip without touching the daemon, got %v", err)
+	}
+	disabled := &config.Config{}
+	disabled.Tailscale.AuthKey = "tskey-inline"
+	if err := tailscaleAutoLogin(ctx, disabled); err != nil {
+		t.Fatalf("disabled: auto login must skip, got %v", err)
+	}
+}
+
+func TestTailscaleAutoLoginRunsUpOnceReady(t *testing.T) {
+	oldStatus, oldUp := tailscaleStatusFn, tailscaleUpFn
+	t.Cleanup(func() { tailscaleStatusFn, tailscaleUpFn = oldStatus, oldUp })
+
+	statusCalls := 0
+	tailscaleStatusFn = func(ctx context.Context, cfg *config.Config) (TailscaleState, error) {
+		statusCalls++
+		if statusCalls == 1 {
+			return TailscaleState{}, errors.New("daemon not ready")
+		}
+		return TailscaleState{BackendState: "NeedsLogin"}, nil
+	}
+	upCalls := 0
+	tailscaleUpFn = func(ctx context.Context, cfg *config.Config) error {
+		upCalls++
+		return nil
+	}
+
+	cfg := &config.Config{}
+	cfg.Tailscale.Enabled = true
+	cfg.Tailscale.AuthKey = "tskey-inline"
+	if err := tailscaleAutoLogin(context.Background(), cfg); err != nil {
+		t.Fatalf("auto login failed: %v", err)
+	}
+	if statusCalls != 2 || upCalls != 1 {
+		t.Fatalf("statusCalls = %d, upCalls = %d; want 2 retries then exactly one up", statusCalls, upCalls)
+	}
+}
+
+func TestTailscaleAutoLoginSkipsWhenAlreadyRunning(t *testing.T) {
+	oldStatus, oldUp := tailscaleStatusFn, tailscaleUpFn
+	t.Cleanup(func() { tailscaleStatusFn, tailscaleUpFn = oldStatus, oldUp })
+
+	tailscaleStatusFn = func(ctx context.Context, cfg *config.Config) (TailscaleState, error) {
+		return TailscaleState{BackendState: "Running", Online: true}, nil
+	}
+	upCalls := 0
+	tailscaleUpFn = func(ctx context.Context, cfg *config.Config) error {
+		upCalls++
+		return nil
+	}
+
+	cfg := &config.Config{}
+	cfg.Tailscale.Enabled = true
+	cfg.Tailscale.AuthKey = "tskey-inline"
+	if err := tailscaleAutoLogin(context.Background(), cfg); err != nil {
+		t.Fatalf("auto login failed: %v", err)
+	}
+	if upCalls != 0 {
+		t.Fatalf("up ran %d times for an already logged-in daemon", upCalls)
 	}
 }

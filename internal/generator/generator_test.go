@@ -150,6 +150,109 @@ func TestDarwinProfileBindsDNSOnlyToLoopback(t *testing.T) {
 	}
 }
 
+func TestDesktopTUNProfileHijacksDNSAndSuppressesAAAA(t *testing.T) {
+	enabledDNS := true
+	cfg := &config.Config{
+		Ports: config.Ports{Mixed: 2080, Controller: "127.0.0.1:9090"},
+		DNS:   config.DNS{Enabled: &enabledDNS},
+		TUN:   config.TUN{Enabled: true, AutoRoute: true, AutoDetectInterface: true},
+	}
+	text, err := Render(cfg, config.Target{Name: "linux", Type: "linux-mihomo", Output: "profiles/linux.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "  dns-hijack:\n    - any:53\n") {
+		t.Fatalf("desktop TUN profile does not hijack DNS:\n%s", text)
+	}
+	if !strings.Contains(text, "  ipv6: false\n") {
+		t.Fatalf("hijacked DNS must answer A-only (ipv6 false):\n%s", text)
+	}
+}
+
+func TestDesktopTUNProfileRespectsConfiguredHijack(t *testing.T) {
+	enabledDNS := true
+	cfg := &config.Config{
+		Ports: config.Ports{Mixed: 2080, Controller: "127.0.0.1:9090"},
+		DNS:   config.DNS{Enabled: &enabledDNS},
+		TUN:   config.TUN{Enabled: true, DNSHijack: []string{"any:5353"}},
+	}
+	text, err := Render(cfg, config.Target{Name: "linux", Type: "linux-mihomo", Output: "profiles/linux.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "    - any:5353\n") {
+		t.Fatalf("configured dnsHijack was dropped:\n%s", text)
+	}
+	if strings.Contains(text, "    - any:53\n") {
+		t.Fatalf("default hijack must not be appended to the configured one:\n%s", text)
+	}
+}
+
+func TestNoTUNProfileKeepsIPv6AndNoHijack(t *testing.T) {
+	enabledDNS := true
+	cfg := &config.Config{
+		Ports: config.Ports{Mixed: 2080, Controller: "127.0.0.1:9090"},
+		DNS:   config.DNS{Enabled: &enabledDNS},
+	}
+	text, err := Render(cfg, config.Target{Name: "linux", Type: "linux-mihomo", Output: "profiles/linux.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(text, "dns-hijack") {
+		t.Fatalf("profile without TUN must not hijack DNS:\n%s", text)
+	}
+	if !strings.Contains(text, "  ipv6: true\n") {
+		t.Fatalf("profile without TUN keeps IPv6 answers:\n%s", text)
+	}
+}
+
+func TestDesktopTUNProfileExcludesTailnetRoutes(t *testing.T) {
+	enabledDNS := true
+	cfg := &config.Config{
+		Ports: config.Ports{Mixed: 2080, Controller: "127.0.0.1:9090"},
+		DNS:   config.DNS{Enabled: &enabledDNS},
+		TUN:   config.TUN{Enabled: true, AutoRoute: true},
+	}
+	cfg.Tailscale.Enabled = true
+	text, err := Render(cfg, config.Target{Name: "linux", Type: "linux-mihomo", Output: "profiles/linux.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"  route-exclude-address:\n",
+		"    - 100.64.0.0/10\n",
+		"    - fd7a:115c:a1e0::/48\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("tailnet routes must be excluded from TUN capture, missing %q:\n%s", want, text)
+		}
+	}
+
+	cfg.Tailscale.Enabled = false
+	text, err = Render(cfg, config.Target{Name: "linux", Type: "linux-mihomo", Output: "profiles/linux.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(text, "route-exclude-address") {
+		t.Fatalf("tailnet exclusion must stay away while tailnet is disabled:\n%s", text)
+	}
+}
+
+func TestDesktopProfileRoutesFallbackDohThroughProxy(t *testing.T) {
+	enabledDNS := true
+	cfg := &config.Config{
+		Ports: config.Ports{Mixed: 2080, Controller: "127.0.0.1:9090"},
+		DNS:   config.DNS{Enabled: &enabledDNS},
+	}
+	text, err := Render(cfg, config.Target{Name: "linux", Type: "linux-mihomo", Output: "profiles/linux.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "- https://dns.google/dns-query#PROXY\n") {
+		t.Fatalf("fallback DoH must be routed through the proxy group:\n%s", text)
+	}
+}
+
 func TestProviderYAMLFormats(t *testing.T) {
 	for _, input := range []string{
 		"proxies:\n- type: ss\n  name: node-a\n  server: example.test\n",

@@ -331,6 +331,28 @@ func providerNodeNames(lines []string) []string {
 	return names
 }
 
+// tunDNSHijack returns the DNS hijack entries for a desktop TUN profile.
+// Without hijacking, TUN clients keep resolving through their own resolver
+// and receive AAAA records; a proxied IPv6 destination then depends on the
+// remote node dialing IPv6, which commodity nodes routinely cannot do. Every
+// dual-stack client — Go dialers included — intermittently fails on that v6
+// leg while the v4 leg works, which shows up as flaky TLS EOFs. Hijacking
+// DNS and answering A-only keeps every client on the working IPv4 path.
+// An explicitly configured dnsHijack always wins; a disabled DNS section
+// disables the default too, since a hijack without a resolver is a black hole.
+func tunDNSHijack(cfg *config.Config, target config.Target) []string {
+	if cfg == nil || !cfg.TUN.Enabled || isMobileTarget(target) {
+		return nil
+	}
+	if len(cfg.TUN.DNSHijack) > 0 {
+		return cfg.TUN.DNSHijack
+	}
+	if cfg.DNS.Enabled != nil && !*cfg.DNS.Enabled {
+		return nil
+	}
+	return []string{"any:53"}
+}
+
 func renderTUN(b *strings.Builder, cfg *config.Config, target config.Target) {
 	if !cfg.TUN.Enabled || isMobileTarget(target) {
 		return
@@ -345,11 +367,19 @@ func renderTUN(b *strings.Builder, cfg *config.Config, target config.Target) {
 	linef(b, "  auto-route: %t", cfg.TUN.AutoRoute)
 	linef(b, "  auto-detect-interface: %t", cfg.TUN.AutoDetectInterface)
 	linef(b, "  strict-route: %t", cfg.TUN.StrictRoute)
-	if len(cfg.TUN.DNSHijack) > 0 {
+	if hijack := tunDNSHijack(cfg, target); len(hijack) > 0 {
 		linef(b, "  dns-hijack:")
-		for _, item := range cfg.TUN.DNSHijack {
+		for _, item := range hijack {
 			linef(b, "    - %s", item)
 		}
+	}
+	// Tailnet traffic must bypass the TUN capture. Without the exclusion the
+	// wireguard destinations fall into the catch-all proxy rule and die on the
+	// remote node; only the Tailscale adapter's own routes can reach them.
+	if cfg.Tailscale.Enabled {
+		linef(b, "  route-exclude-address:")
+		linef(b, "    - 100.64.0.0/10")
+		linef(b, "    - fd7a:115c:a1e0::/48")
 	}
 	linef(b, "")
 }
@@ -362,7 +392,11 @@ func renderDNS(b *strings.Builder, cfg *config.Config, target config.Target) {
 	directNS := defaultList(cfg.DNS.DirectNameservers, []string{"223.5.5.5", "114.114.114.114"})
 	proxyNS := defaultList(cfg.DNS.ProxyServerNameservers, []string{"223.5.5.5", "114.114.114.114"})
 	nameservers := defaultList(cfg.DNS.Nameservers, []string{"https://dns.alidns.com/dns-query", "https://doh.pub/dns-query"})
-	fallbacks := defaultList(cfg.DNS.Fallbacks, []string{"https://dns.google/dns-query"})
+	// The fallback resolvers answer for blocked domains; dns.google itself is
+	// blocked from direct dialing, so every fallback query timed out and took
+	// the whole resolution down with it (multi-second stalls, intermittent
+	// failures). Routing the fallback through the PROXY group keeps it alive.
+	fallbacks := defaultList(cfg.DNS.Fallbacks, []string{"https://dns.google/dns-query#PROXY"})
 
 	linef(b, "dns:")
 	linef(b, "  enable: true")
@@ -375,7 +409,10 @@ func renderDNS(b *strings.Builder, cfg *config.Config, target config.Target) {
 		}
 		linef(b, "  listen: %s", listenAddress)
 	}
-	linef(b, "  ipv6: true")
+	// When the profile hijacks client DNS through the TUN resolver, AAAA
+	// answers are suppressed: proxied IPv6 destinations fail at the remote
+	// node, so dual-stack clients must stay on IPv4 (see tunDNSHijack).
+	linef(b, "  ipv6: %t", len(tunDNSHijack(cfg, target)) == 0)
 	linef(b, "  respect-rules: false")
 	yamlList(b, "  default-nameserver:", "    ", defaultNS)
 	yamlList(b, "  direct-nameserver:", "    ", directNS)
