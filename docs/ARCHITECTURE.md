@@ -63,3 +63,34 @@ Network post-processing belongs to a single core lifetime. Cancellation terminat
 These source changes require fresh runtime acceptance. Earlier deployment results do not validate them. A diagnostic process running from a different runtime root is not evidence that port ownership checks should be removed.
 
 Do not interpret this review as proof that every defect has been eliminated.
+
+## Tailscale supervision
+
+The daemon is a child process with a private state directory and a single IPC
+endpoint for the machine: a named pipe on Windows, a socket file elsewhere. Only
+one daemon can serve that endpoint, so supervision owns three obligations.
+
+Cancellation stops the daemon and only then reports a stop. A supervisor that
+returned while the process was still running left the endpoint reserved, and
+every later start failed in `safesocket.Listen` with `Access is denied` until the
+leftover was killed by hand. The wait after the kill is bounded, and the service
+stop budget covers that bound instead of a shorter fixed timeout that reported a
+correct stop as a failure.
+
+A daemon that outlived an earlier supervisor is terminated before a new start,
+because that failure is only visible in the daemon's own log and the retry would
+otherwise keep failing. Candidates are matched by resolved executable path, never
+by image name, and cleanup is limited to the MeshMux-owned default path: a
+system-wide Tailscale installation runs an executable with the same file name,
+and an operator-supplied component path may be that installation. On Windows the
+daemon is additionally assigned to a job object with kill-on-close, because a
+child is not reaped when its parent dies; elsewhere a daemon left behind by a
+supervisor that was killed outright still has to be stopped by hand.
+
+A daemon exit reports the last failure line of its own log next to the exit
+status, which is otherwise the same for every cause. Failure frequency remains
+bounded by the exponential retry schedule, and the tailscale component's schedule
+is now cleared after a run that stayed up, as the core's already was.
+
+Fresh runtime acceptance is still required for these changes; no deployment
+recorded here has run them.

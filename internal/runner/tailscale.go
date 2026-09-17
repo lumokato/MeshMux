@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/meshmux/meshmux/internal/config"
 	"github.com/meshmux/meshmux/internal/fileutil"
@@ -173,9 +174,37 @@ func tailscaledCommand(cfg *config.Config) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
+// tailscaledStopForceTimeout bounds the wait for a killed daemon to actually
+// disappear. TerminateProcess only starts the teardown; the process object, and
+// with it the pipe instance that reserves the IPC endpoint, is released when the
+// process is really gone.
+var tailscaledStopForceTimeout = 5 * time.Second
+
+// TailscaledStopBudget is the longest a cancelled supervisor can take before it
+// reports the daemon stopped. A caller that cancels supervision - the Windows
+// service stop path - must allow at least this long, or it reports a stop
+// timeout while the kill is still in flight and treats a working stop as a
+// failure.
+func TailscaledStopBudget() time.Duration {
+	return tailscaledStopForceTimeout
+}
+
+// waitDaemonExit and killDaemon are seams for tests.
+var (
+	waitDaemonExit = func(cmd *exec.Cmd) error { return cmd.Wait() }
+	killDaemon     = func(cmd *exec.Cmd) error { return cmd.Process.Kill() }
+)
+
 // TailscaleSupervision runs the tailscaled daemon until ctx is cancelled or
 // the process exits. The caller (service loop or headless run) decides how to
 // react to a non-nil error.
+//
+// Cancelling ctx must actually stop the daemon. Its IPC endpoint is one named
+// pipe for the whole machine, so a daemon that outlives its supervisor keeps
+// the name reserved: every later start dies in safesocket.Listen with
+// "Access is denied", the data plane stays down, and only a manual kill of the
+// leftover process clears it. A cancellation that leaks the child therefore
+// turns one restart into an outage.
 func TailscaleSupervision(ctx context.Context, cfg *config.Config) error {
 	if cfg == nil {
 		return errors.New("config is required")
@@ -183,6 +212,10 @@ func TailscaleSupervision(ctx context.Context, cfg *config.Config) error {
 	if err := PrepareTailscaleComponents(cfg); err != nil {
 		return err
 	}
+	// Only one daemon can serve the endpoint. Anything else started from the
+	// same binary is a leftover that would take the name first and make this
+	// start fail, so it is removed before the launch rather than after.
+	reapStaleTailscaled(cfg)
 	cmd, err := tailscaledCommand(cfg)
 	if err != nil {
 		return err
@@ -198,8 +231,115 @@ func TailscaleSupervision(ctx context.Context, cfg *config.Config) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("启动 tailscaled 失败: %w", err)
 	}
+	// Windows never reaps a child when its parent dies, so without the job a
+	// crashed or force-killed supervisor would leave the daemon holding the
+	// endpoint with nobody left to stop it.
+	releaseJob := assignToKillOnCloseJob(cmd.Process.Pid)
+	defer releaseJob()
 	appendRunnerLog("tailscaled 已启动 (PID %d)", cmd.Process.Pid)
-	return cmd.Wait()
+	return superviseDaemon(ctx, cmd)
+}
+
+// superviseDaemon waits for the daemon and guarantees that a cancelled
+// supervisor does not return while the process is still running.
+func superviseDaemon(ctx context.Context, cmd *exec.Cmd) error {
+	exited := make(chan error, 1)
+	go func() {
+		exited <- waitDaemonExit(cmd)
+	}()
+	select {
+	case err := <-exited:
+		if err == nil {
+			return nil
+		}
+		// The exit status alone never says why; the daemon log does.
+		return fmt.Errorf("tailscaled 退出: %w%s", err, tailscaledFailureLog())
+	case <-ctx.Done():
+		stopDaemonProcess(cmd, exited)
+		return ctx.Err()
+	}
+}
+
+// stopDaemonProcess kills the daemon and does not return until it is gone.
+// Nothing can ask a hidden child to shut down here, so the kill is the only way
+// to release the endpoint, and the bounded wait is what makes the supervisor's
+// "stopped" report true: returning while the process still held the pipe is what
+// left the machine unable to start a daemon again. The wait is bounded so a
+// daemon that somehow ignores termination cannot block a service stop forever.
+func stopDaemonProcess(cmd *exec.Cmd, exited <-chan error) {
+	if cmd.Process == nil {
+		return
+	}
+	pid := cmd.Process.Pid
+	if err := killDaemon(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		appendRunnerLog("停止 tailscaled (PID %d) 失败: %v", pid, err)
+	}
+	force := time.NewTimer(tailscaledStopForceTimeout)
+	defer force.Stop()
+	select {
+	case <-exited:
+		appendRunnerLog("已停止 tailscaled (PID %d)", pid)
+	case <-force.C:
+		appendRunnerLog("tailscaled (PID %d) 在 %s 内未退出，IPC 端点可能仍被占用", pid, tailscaledStopForceTimeout)
+	}
+}
+
+// tailscaledFailureLog returns the daemon's own last word about why it stopped.
+// The exit status ("exit status 1") is the same whatever went wrong, so the
+// supervisor repeats it forever without ever naming the cause; the reason - for
+// example a failed safesocket.Listen - only exists in the daemon log.
+func tailscaledFailureLog() string {
+	text := recentLogText(filepath.Join("logs", "tailscaled.out.log"))
+	if text == "" {
+		return ""
+	}
+	reason := tailscaledReasonLine(text)
+	if reason == "" {
+		return ""
+	}
+	return ":\n" + filepath.Base(filepath.Join("logs", "tailscaled.out.log")) + ": " + reason
+}
+
+// tailscaledReasonLine picks the most useful line out of a log tail: the last
+// line that looks like a failure, else the last line that is not empty.
+func tailscaledReasonLine(text string) string {
+	var last, failure string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		last = line
+		if isTailscaledFailureLine(line) {
+			failure = line
+		}
+	}
+	if failure != "" {
+		return truncateLogLine(failure)
+	}
+	return truncateLogLine(last)
+}
+
+func isTailscaledFailureLine(line string) bool {
+	lower := strings.ToLower(line)
+	for _, marker := range []string{"access is denied", "safesocket", "level=error", "fatal", "panic", "exit status"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func truncateLogLine(line string) string {
+	const limit = 240
+	if len(line) <= limit {
+		return line
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(line[cut]) {
+		cut--
+	}
+	return line[:cut] + "…"
 }
 
 func tailscaleCLIPath(cfg *config.Config) string {
