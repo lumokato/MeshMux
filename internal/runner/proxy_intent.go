@@ -27,6 +27,11 @@ func SetProxyIntent(on bool) error {
 	if on {
 		value = "on"
 	}
+	// The data dir normally exists (EnsureLocalConfig creates it), but a fresh
+	// CI runner or an unusual install may not have it yet.
+	if err := os.MkdirAll(config.LocalDataDir(), 0755); err != nil {
+		return err
+	}
 	return os.WriteFile(ProxyIntentPath(), []byte(value), 0600)
 }
 
