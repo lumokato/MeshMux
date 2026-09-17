@@ -207,8 +207,40 @@ func TestPlatformActionPolicy(t *testing.T) {
 	}
 }
 
-func TestLinuxActionAPIRejectsRuntimeAndDesktopActions(t *testing.T) {
-	s := &Server{ConfigPath: filepath.Join(t.TempDir(), "missing.json")}
+func TestTailscaleUpActionGuards(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meshmux.local.json")
+	if err := os.WriteFile(path, []byte(`{"name":"test"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{ConfigPath: path}
+
+	post := func() *httptest.ResponseRecorder {
+		body, err := json.Marshal(map[string]string{"action": "tailscale-up"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/action", bytes.NewReader(body))
+		resp := httptest.NewRecorder()
+		s.actionAPIFor("windows", resp, req)
+		return resp
+	}
+
+	resp := post()
+	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "Tailnet 未启用") {
+		t.Fatalf("disabled tailnet: status = %d, body = %q", resp.Code, resp.Body.String())
+	}
+
+	enabled := `{"name":"test","tailscale":{"enabled":true}}`
+	if err := os.WriteFile(path, []byte(enabled), 0600); err != nil {
+		t.Fatal(err)
+	}
+	resp = post()
+	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "Auth Key") {
+		t.Fatalf("missing auth key: status = %d, body = %q", resp.Code, resp.Body.String())
+	}
+}
+
+func TestLinuxActionAPIRejectsRuntimeAndDesktopActions(t *testing.T) {	s := &Server{ConfigPath: filepath.Join(t.TempDir(), "missing.json")}
 	for _, action := range []string{"start", "stop", "proxy-on", "proxy-off", "dashboard"} {
 		t.Run(action, func(t *testing.T) {
 			body, err := json.Marshal(map[string]string{"action": action})

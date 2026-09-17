@@ -676,6 +676,7 @@ Usage:
   meshmux dashboard [-config path]
   meshmux proxy on|off|show [-config path]
   meshmux autostart on|off|show
+  meshmux tailscale up|down|status [-config path]
   meshmux service install|activate|remove|start|stop|restart|status [-config path]
   meshmux version
 `)
