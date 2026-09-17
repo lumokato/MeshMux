@@ -43,7 +43,7 @@
       "https://doh.pub/dns-query"
     ],
     "fallbacks": [
-      "https://dns.google/dns-query"
+      "https://dns.google/dns-query#PROXY"
     ],
     "nameserverPolicy": {
       "+.i.example.com": [
