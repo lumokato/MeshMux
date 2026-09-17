@@ -41,6 +41,12 @@ Source: "{#SourceDir}\MeshMux.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\meshmux-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\bin\mihomo.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#SourceDir}\bin\mihomo.exe"; DestDir: "{localappdata}\MeshMux\bin"; Flags: ignoreversion onlyifdoesntexist uninsneveruninstall
+Source: "{#SourceDir}\bin\tailscaled.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "{#SourceDir}\bin\tailscaled.exe"; DestDir: "{localappdata}\MeshMux\bin"; Flags: ignoreversion onlyifdoesntexist uninsneveruninstall
+Source: "{#SourceDir}\bin\tailscale.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "{#SourceDir}\bin\tailscale.exe"; DestDir: "{localappdata}\MeshMux\bin"; Flags: ignoreversion onlyifdoesntexist uninsneveruninstall
+Source: "{#SourceDir}\bin\wintun.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "{#SourceDir}\bin\wintun.dll"; DestDir: "{localappdata}\MeshMux\bin"; Flags: ignoreversion onlyifdoesntexist uninsneveruninstall
 Source: "{#SourceDir}\bin\geoip.metadb"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#SourceDir}\bin\geoip.metadb"; DestDir: "{localappdata}\MeshMux"; Flags: ignoreversion uninsneveruninstall
 Source: "{#SourceDir}\dashboard\*"; DestDir: "{app}\dashboard"; Flags: ignoreversion recursesubdirs createallsubdirs

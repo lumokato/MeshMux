@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -101,6 +100,49 @@ func managedPIDMatches(pid int, expected string) bool {
 	return sameExecutablePath(actual, expected)
 }
 
+// isMihomoCorePath reports whether a process image is a mihomo core. The check
+// is deliberately name based: reclaiming must never terminate an unrelated
+// listener that merely shares a port (a separate VPN product, for example).
+func isMihomoCorePath(path string) bool {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(path)))
+	return base == "mihomo" || base == "mihomo.exe"
+}
+
+// reclaimForeignCores terminates mihomo instances that hold this
+// configuration's ports without belonging to it. Such a process is a leftover
+// from another MeshMux location (install directory, user session, older data
+// directory). Without reclamation the ports stay busy forever, the owned core
+// exits immediately, and the supervisor retries in a loop.
+func reclaimForeignCores(cfg *config.Config) error {
+	expected, err := expectedMihomoPath(cfg)
+	if err != nil {
+		return err
+	}
+	owners, err := processOS.listeningProcesses(discoveryPorts(cfg))
+	if err != nil {
+		return err
+	}
+	var failures []string
+	for _, owner := range owners {
+		if managedPIDMatches(owner.PID, expected) {
+			continue
+		}
+		actual, pathErr := processOS.executablePath(owner.PID)
+		if pathErr != nil || !isMihomoCorePath(actual) {
+			continue
+		}
+		if err := processOS.kill(owner.PID); err != nil {
+			failures = append(failures, fmt.Sprintf("PID %d: %v", owner.PID, err))
+			continue
+		}
+		appendRunnerLog("已回收抢占端口 %d 的遗留 mihomo 实例 (PID %d, %s)", owner.Port, owner.PID, actual)
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("回收遗留 mihomo 实例失败: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
 func expectedMihomoPath(cfg *config.Config) (string, error) {
 	if cfg == nil {
 		return "", fmt.Errorf("config is required")
@@ -132,7 +174,7 @@ func sameExecutablePath(a, b string) bool {
 	}
 	a = clean(a)
 	b = clean(b)
-	if runtime.GOOS == "windows" {
+	if caseInsensitivePaths() {
 		return strings.EqualFold(a, b)
 	}
 	return a == b
@@ -141,7 +183,7 @@ func sameExecutablePath(a, b string) bool {
 func discoveryPorts(cfg *config.Config) []int {
 	var ports []int
 	if cfg != nil {
-		if port := controllerPort(cfg.Ports.Controller); port > 0 {
+		if port := portFromAddress(cfg.Ports.Controller); port > 0 {
 			ports = append(ports, port)
 		}
 		if cfg.Ports.Mixed > 0 && !containsPort(ports, cfg.Ports.Mixed) {
@@ -151,7 +193,9 @@ func discoveryPorts(cfg *config.Config) []int {
 	return ports
 }
 
-func controllerPort(address string) int {
+// portFromAddress extracts the numeric port from a listen or dial address.
+// It accepts "127.0.0.1:2080", "*:2080" and "[::1]:2080" forms.
+func portFromAddress(address string) int {
 	address = strings.TrimSpace(address)
 	if address == "" {
 		return 0

@@ -38,11 +38,6 @@ func runWindowsService(args []string) error {
 	if err := os.Chdir(home); err != nil {
 		return err
 	}
-	if cfg, _, err := load(configArgs(configPath)); err == nil && tailnetNeedsForcedLogin(cfg, home) {
-		if err := os.Setenv("TSNET_FORCE_LOGIN", "1"); err != nil {
-			return err
-		}
-	}
 	return svc.Run(winservice.Name, &serviceHandler{configPath: configPath})
 }
 
@@ -61,6 +56,79 @@ const (
 
 var serviceResumeDelay = 5 * time.Second
 var serviceCoreRetryDelay = 5 * time.Second
+var serviceRetryMaxDelay = 5 * time.Minute
+
+// serviceRetryBackoff returns the delay before the nth consecutive retry of one
+// component. A fixed interval turned a single missing binary into a permanent
+// five-second restart storm, so the delay doubles up to serviceRetryMaxDelay.
+func serviceRetryBackoff(attempt int) time.Duration {
+	if attempt <= 1 {
+		return serviceCoreRetryDelay
+	}
+	delay := serviceCoreRetryDelay
+	for index := 1; index < attempt; index++ {
+		if delay >= serviceRetryMaxDelay {
+			break
+		}
+		delay *= 2
+	}
+	if delay > serviceRetryMaxDelay {
+		delay = serviceRetryMaxDelay
+	}
+	return delay
+}
+
+// serviceRetryMinUptime is how long a component must stay up before its retry
+// schedule counts as healthy again. Starting a component only spawns a
+// goroutine, so "start returned no error" says nothing about the process
+// surviving; without this, a daemon that exits immediately would reset the
+// backoff on every attempt and retry forever on the base delay.
+const serviceRetryMinUptime = 30 * time.Second
+
+// serviceRetry tracks one component's retry schedule. Components back off
+// independently so a failure in one never restarts the other.
+type serviceRetry struct {
+	attempt int
+	timer   *time.Timer
+	ready   <-chan time.Time
+}
+
+func newServiceRetry() *serviceRetry {
+	return &serviceRetry{}
+}
+
+func (r *serviceRetry) schedule() {
+	r.stop()
+	r.attempt++
+	r.timer = time.NewTimer(serviceRetryBackoff(r.attempt))
+	r.ready = r.timer.C
+}
+
+// observe clears the accumulated backoff only after a component has actually
+// stayed up. A short-lived run keeps the current attempt so the delay keeps
+// growing.
+func (r *serviceRetry) observe(uptime time.Duration) {
+	if uptime >= serviceRetryMinUptime {
+		r.reset()
+	}
+}
+
+func (r *serviceRetry) reset() {
+	r.stop()
+	r.attempt = 0
+}
+
+func (r *serviceRetry) stop() {
+	if r.timer != nil {
+		if !r.timer.Stop() {
+			select {
+			case <-r.timer.C:
+			default:
+			}
+		}
+	}
+	r.ready = nil
+}
 
 func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
 	const accepts = svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPowerEvent
@@ -98,16 +166,44 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 		coreDone = nil
 		return err
 	}
+	var tsCore *serviceCore
+	var tsDone <-chan struct{}
+	startTailscale := func() error {
+		cfg, _, err := load(configArgs(h.configPath))
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		if !cfg.Tailscale.Enabled {
+			return nil
+		}
+		replacement := startTailscaleService(cfg)
+		tsCore = replacement
+		tsDone = replacement.done
+		return nil
+	}
+	stopTailscale := func() error {
+		if tsCore == nil {
+			return nil
+		}
+		err := stopServiceCore(tsCore, 5*time.Second)
+		if err != nil {
+			return err
+		}
+		tsCore = nil
+		tsDone = nil
+		return err
+	}
 	defer func() {
 		if core != nil {
 			core.cancel()
+		}
+		if tsCore != nil {
+			tsCore.cancel()
 		}
 	}()
 
 	var resumeTimer *time.Timer
 	var resume <-chan time.Time
-	var retryTimer *time.Timer
-	var retry <-chan time.Time
 	stopResumeTimer := func() {
 		if resumeTimer != nil {
 			if !resumeTimer.Stop() {
@@ -120,27 +216,31 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 		resume = nil
 	}
 	defer stopResumeTimer()
-	stopRetryTimer := func() {
-		if retryTimer != nil {
-			if !retryTimer.Stop() {
-				select {
-				case <-retryTimer.C:
-				default:
-				}
-			}
+
+	// The core and the tailscale daemon back off independently. Sharing one
+	// schedule let a missing tailscaled restart the mihomo core every few
+	// seconds, which is what left several cores fighting over the same ports.
+	coreRetry := newServiceRetry()
+	tailscaleRetry := newServiceRetry()
+	defer coreRetry.stop()
+	defer tailscaleRetry.stop()
+
+	// A successful return only means the component was spawned; the retry
+	// schedule is cleared later, once the process has actually stayed up.
+	startCoreTracked := func() {
+		if err := startCore(); err != nil {
+			appendServiceLog(h.configPath, err.Error())
+			coreRetry.schedule()
 		}
-		retry = nil
 	}
-	defer stopRetryTimer()
-	scheduleRetry := func() {
-		stopRetryTimer()
-		retryTimer = time.NewTimer(serviceCoreRetryDelay)
-		retry = retryTimer.C
+	startTailscaleTracked := func() {
+		if err := startTailscale(); err != nil {
+			appendServiceLog(h.configPath, "tailscale: "+err.Error())
+			tailscaleRetry.schedule()
+		}
 	}
-	if err := startCore(); err != nil {
-		appendServiceLog(h.configPath, err.Error())
-		scheduleRetry()
-	}
+	startCoreTracked()
+	startTailscaleTracked()
 
 	for {
 		select {
@@ -157,16 +257,23 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 				resume = resumeTimer.C
 			case svc.Stop, svc.Shutdown:
 				stopResumeTimer()
-				stopRetryTimer()
+				coreRetry.stop()
+				tailscaleRetry.stop()
 				changes <- svc.Status{State: svc.StopPending}
-				if err := stopCore(); err != nil {
-					return serviceFailure(h.configPath, "stop core", err)
+				stopErr := stopCore()
+				tsStopErr := stopTailscale()
+				if stopErr != nil {
+					return serviceFailure(h.configPath, "stop core", stopErr)
+				}
+				if tsStopErr != nil {
+					return serviceFailure(h.configPath, "stop tailscale", tsStopErr)
 				}
 				return false, 0
 			}
 		case <-resume:
 			resume = nil
-			stopRetryTimer()
+			coreRetry.stop()
+			tailscaleRetry.stop()
 			appendServiceLog(h.configPath, "power resume: restarting core")
 			if err := stopCore(); err != nil {
 				appendServiceLog(h.configPath, "restart core after resume: "+err.Error())
@@ -174,12 +281,28 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 			}
 			if err := startCore(); err != nil {
 				appendServiceLog(h.configPath, "restart core after resume: "+err.Error())
-				scheduleRetry()
+				coreRetry.schedule()
+				continue
+			}
+			// Sleep also kills the tailscaled daemon's WireGuard sessions and the
+			// proxy mapping it dials through, but a supervised daemon that survives
+			// the suspend never reports a failure. Restart it unconditionally: a
+			// daemon that was already gone simply makes stopTailscale a no-op, while
+			// keeping the stale one left the data plane dead until a manual restart.
+			appendServiceLog(h.configPath, "power resume: restarting tailscale")
+			if err := stopTailscale(); err != nil {
+				appendServiceLog(h.configPath, "restart tailscale after resume: "+err.Error())
+				continue
+			}
+			if err := startTailscale(); err != nil {
+				appendServiceLog(h.configPath, "power resume: tailscale: "+err.Error())
+				tailscaleRetry.schedule()
 				continue
 			}
 			appendServiceLog(h.configPath, "power resume: core start scheduled")
 		case <-coreDone:
 			err := core.err
+			uptime := core.uptime()
 			core.cancel()
 			core = nil
 			coreDone = nil
@@ -188,26 +311,58 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 			} else {
 				appendServiceLog(h.configPath, "run core: process exited")
 			}
-			scheduleRetry()
-		case <-retry:
-			retry = nil
+			coreRetry.observe(uptime)
+			coreRetry.schedule()
+		case <-tsDone:
+			err := tsCore.err
+			uptime := tsCore.uptime()
+			tsCore.cancel()
+			tsCore = nil
+			tsDone = nil
+			if err != nil {
+				appendServiceLog(h.configPath, "tailscale: "+err.Error())
+			} else {
+				appendServiceLog(h.configPath, "tailscale: daemon exited")
+			}
+			// Only the tailscale component is rescheduled; the mihomo core keeps
+			// running untouched.
+			tailscaleRetry.observe(uptime)
+			tailscaleRetry.schedule()
+		case <-coreRetry.ready:
+			coreRetry.ready = nil
 			if err := startCore(); err != nil {
 				appendServiceLog(h.configPath, err.Error())
-				scheduleRetry()
+				coreRetry.schedule()
+			}
+		case <-tailscaleRetry.ready:
+			tailscaleRetry.ready = nil
+			if err := startTailscale(); err != nil {
+				appendServiceLog(h.configPath, "tailscale: "+err.Error())
+				tailscaleRetry.schedule()
 			}
 		}
 	}
 }
 
 type serviceCore struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	err    error
+	cancel    context.CancelFunc
+	done      chan struct{}
+	err       error
+	startedAt time.Time
+}
+
+// uptime reports how long the component process has been supervised. It is
+// read when the process exits to decide whether the run was healthy.
+func (c *serviceCore) uptime() time.Duration {
+	if c == nil || c.startedAt.IsZero() {
+		return 0
+	}
+	return time.Since(c.startedAt)
 }
 
 func startServiceCore(cfg *config.Config, profile string) *serviceCore {
 	ctx, cancel := context.WithCancel(context.Background())
-	core := &serviceCore{cancel: cancel, done: make(chan struct{})}
+	core := &serviceCore{cancel: cancel, done: make(chan struct{}), startedAt: time.Now()}
 	go func() {
 		defer close(core.done)
 		core.err = runServiceCore(ctx, cfg, profile, func(int) error { return nil })
@@ -231,6 +386,20 @@ func isResumePowerEvent(eventType uint32) bool {
 
 var runServiceCore = func(ctx context.Context, cfg *config.Config, profile string, ready func(int) error) error {
 	return runner.ServiceContext(ctx, cfg, profile, ready)
+}
+
+var runTailscaleSupervision = func(ctx context.Context, cfg *config.Config) error {
+	return runner.TailscaleSupervision(ctx, cfg)
+}
+
+func startTailscaleService(cfg *config.Config) *serviceCore {
+	ctx, cancel := context.WithCancel(context.Background())
+	core := &serviceCore{cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(core.done)
+		core.err = runTailscaleSupervision(ctx, cfg)
+	}()
+	return core
 }
 
 var (
@@ -582,9 +751,13 @@ func prepareServiceSnapshotFiles(sourcePath string) (result string, resultErr er
 	if err := installServiceCore(dataDir); err != nil {
 		return "", err
 	}
+	if err := installServiceComponents(dataDir); err != nil {
+		return "", err
+	}
 
 	stored := cfg.StorageCopy()
 	stored.Components.Mihomo.Path = config.DefaultMihomoPath()
+	stored.Components.Tailscale.Path = config.DefaultTailscaledPath()
 	stored.Paths.Dashboard = "dashboard"
 	configData, err := json.MarshalIndent(stored, "", "  ")
 	if err != nil {
@@ -627,6 +800,54 @@ func copyFileForService(source, target string) error {
 		_, err := io.Copy(out, in)
 		return err
 	})
+}
+
+// installServiceComponents seeds the bundled tailscale trio and the shared TUN
+// driver into the directory the service actually reads. The installer places
+// them next to its own executable, but the service resolves bin/ relative to
+// its data directory, so without this copy every tailscaled start fails and a
+// copied mihomo core silently loses TUN support.
+func installServiceComponents(dataDir string) error {
+	candidates := []struct {
+		source string
+		target string
+	}{
+		{config.BundledTailscaledPath(), filepath.Join(dataDir, config.DefaultTailscaledPath())},
+		{config.BundledTailscaleCLIPath(), filepath.Join(dataDir, config.DefaultTailscaleCLIPath())},
+		{config.BundledWintunPath(), filepath.Join(dataDir, "bin", "wintun.dll")},
+	}
+	missing := 0
+	for _, candidate := range candidates {
+		if serviceComponentMissing(candidate.source, candidate.target) {
+			missing++
+		}
+	}
+	if missing == 0 {
+		return nil
+	}
+	for _, candidate := range candidates {
+		if !serviceComponentMissing(candidate.source, candidate.target) {
+			continue
+		}
+		if err := copyFileForService(candidate.source, candidate.target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// serviceComponentMissing reports whether the bundle should be copied. A missing
+// bundle is not an error: tailscale support is optional, and an existing file is
+// explicit runtime state that an installer upgrade must not overwrite.
+func serviceComponentMissing(source, target string) bool {
+	if source == "" || source == target {
+		return false
+	}
+	if _, err := os.Stat(source); err != nil {
+		return false
+	}
+	info, err := os.Stat(target)
+	return err != nil || info.IsDir() || info.Size() == 0
 }
 
 func updateInstalledServiceCore(sourcePath string) error {
@@ -741,34 +962,6 @@ func rejectBootstrapRegression(sourcePath, currentPath string) error {
 		return nil
 	}
 	return errors.New("拒绝用安装器空模板覆盖现有 MeshMux 服务配置；请恢复 LocalAppData 中的真实配置后重试")
-}
-
-func tailnetNeedsForcedLogin(cfg *config.Config, home string) bool {
-	if cfg == nil || !cfg.Tailscale.Enabled {
-		return false
-	}
-	if strings.TrimSpace(cfg.Tailscale.AuthKey) == "" && strings.TrimSpace(cfg.Tailscale.AuthKeyFile) == "" {
-		return false
-	}
-	return !validTailnetState(filepath.Join(home, "state", "tailscale"))
-}
-
-func validTailnetState(dir string) bool {
-	data, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
-	if err != nil || len(data) == 0 {
-		return false
-	}
-	var state map[string]json.RawMessage
-	if json.Unmarshal(data, &state) != nil {
-		return false
-	}
-	for _, key := range []string{"_machinekey", "_current-profile", "_profiles"} {
-		value, ok := state[key]
-		if !ok || len(value) == 0 || string(value) == `""` || string(value) == "null" {
-			return false
-		}
-	}
-	return true
 }
 
 func writeSnapshotFile(path string, data []byte) error {

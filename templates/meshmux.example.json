@@ -60,25 +60,11 @@
   },
   "tailscale": {
     "enabled": false,
-    "controlUrl": "https://controlplane.tailscale.com",
     "authKey": "",
     "authKeyFile": "",
-    "acceptRoutes": true,
-    "ephemeral": false,
-    "exitNode": "",
-    "exitNodeAllowLanAccess": false,
-    "magicDnsSuffix": "",
-    "routes": [
-      "100.64.0.0/10"
-    ],
-    "ipv6Routes": [
-      "fd7a:115c:a1e0::/48"
-    ],
-    "domains": [
-      "*.i.example.com",
-      "*.ts.net"
-    ],
-    "inboundForwards": []
+    "hostname": "",
+    "acceptRoutes": null,
+    "acceptDNS": false
   },
   "rules": {
     "directCidrs": [

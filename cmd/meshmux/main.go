@@ -40,6 +40,12 @@ func run(args []string) error {
 		usage()
 		return nil
 	}
+	// Configuration that a mihomo profile cannot express is reported instead of
+	// being dropped silently during generation.
+	generator.Warn = func(message string) {
+		fmt.Fprintln(os.Stderr, "warning:", message)
+		_ = runner.AppendDiagnosticLog(filepath.Join("logs", "meshmux.log"), message)
+	}
 	switch args[0] {
 	case "_service":
 		return runWindowsService(args[1:])
@@ -223,6 +229,8 @@ func run(args []string) error {
 	case "autostart":
 		mode := commandArg(args[1:], "show")
 		return runner.Autostart(mode)
+	case "tailscale":
+		return tailscaleCommand(args[1:])
 	case "service":
 		return manageWindowsService(args[1:])
 	default:
@@ -341,10 +349,7 @@ func configArgs(path string) []string {
 }
 
 func defaultRuntimeTarget() string {
-	if runtime.GOOS == "linux" {
-		return "linux"
-	}
-	return "windows"
+	return config.DefaultTargetNameFor(runtime.GOOS)
 }
 
 func load(args []string) (*config.Config, string, error) {
@@ -383,11 +388,6 @@ func checkConfig(args []string, output io.Writer) error {
 		}
 	}
 
-	authConfigured := strings.TrimSpace(cfg.Tailscale.AuthKey) != ""
-	if !authConfigured && strings.TrimSpace(cfg.Tailscale.AuthKeyFile) != "" {
-		authConfigured = fileHasContent(cfg.Tailscale.AuthKeyFile)
-	}
-
 	wireGuardAvailable := 0
 	for _, path := range cfg.WireGuard.Configs {
 		if fileHasContent(path) {
@@ -396,25 +396,18 @@ func checkConfig(args []string, output io.Writer) error {
 	}
 
 	dailyProxyOK := cfg.Setup.AllowDirectOnly || providerConfigured || providerCacheAvailable
-	tailnetAuthOK := !cfg.Tailscale.Enabled || authConfigured
 	wireGuardOK := wireGuardAvailable == len(cfg.WireGuard.Configs)
 
 	fmt.Fprintln(output, "config: valid")
 	fmt.Fprintf(output, "config-path: %s\n", path)
 	fmt.Fprintf(output, "daily-proxy-source: %s\n", configured(providerConfigured))
 	fmt.Fprintf(output, "daily-proxy-cache: %s\n", configured(providerCacheAvailable))
-	fmt.Fprintf(output, "tailnet: %s\n", enabled(cfg.Tailscale.Enabled))
-	fmt.Fprintf(output, "tailnet-auth: %s\n", configured(authConfigured))
 	fmt.Fprintf(output, "wireguard-configs: %d/%d available\n", wireGuardAvailable, len(cfg.WireGuard.Configs))
-	fmt.Fprintf(output, "tailnet-inbound-forwards: %d\n", len(cfg.Tailscale.InboundForwards))
 	fmt.Fprintf(output, "direct-only: %s\n", enabled(cfg.Setup.AllowDirectOnly))
 
 	var problems []string
 	if !dailyProxyOK {
 		problems = append(problems, "daily proxy source and cache are both missing")
-	}
-	if !tailnetAuthOK {
-		problems = append(problems, "Tailnet is enabled but no auth key is configured")
 	}
 	if !wireGuardOK {
 		problems = append(problems, "one or more WireGuard config files are missing or empty")
@@ -425,6 +418,42 @@ func checkConfig(args []string, output io.Writer) error {
 	}
 	fmt.Fprintln(output, "result: ready")
 	return nil
+}
+
+func tailscaleCommand(args []string) error {
+	cfg, _, err := load(args)
+	if err != nil {
+		return err
+	}
+	action := strings.ToLower(strings.TrimSpace(commandArg(args, "status")))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	switch action {
+	case "up":
+		return runner.TailscaleUp(ctx, cfg)
+	case "down":
+		return runner.TailscaleDown(ctx, cfg)
+	case "status":
+		status, err := runner.TailscaleStatus(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("tailscale: %s\n", status.BackendState)
+		if status.Online {
+			fmt.Println("online: true")
+		} else {
+			fmt.Println("online: false")
+		}
+		for _, ip := range status.TailscaleIPs {
+			fmt.Println("ip:", ip)
+		}
+		for _, problem := range status.Health {
+			fmt.Println("health:", problem)
+		}
+		return nil
+	default:
+		return fmt.Errorf("tailscale expects up, down, or status")
+	}
 }
 
 func fileHasContent(path string) bool {

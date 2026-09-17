@@ -69,17 +69,9 @@ func TestConfigCheckReportsCompletenessWithoutSecrets(t *testing.T) {
 	}
 
 	const providerSecret = "https://secret.example/subscription"
-	const authSecret = "tskey-auth-secret"
 	cfg := config.Config{
 		Setup:     config.Setup{ProviderURL: providerSecret},
 		WireGuard: config.WireGuard{Configs: []string{filepath.Join("wireguard", "home.conf")}},
-		Tailscale: config.Tailscale{
-			Enabled: true,
-			AuthKey: authSecret,
-			InboundForwards: []config.InboundForward{{
-				Name: "rdp", Network: "tcp", ListenPort: 3389, Target: "127.0.0.1:3389",
-			}},
-		},
 	}
 	data, err := json.Marshal(cfg)
 	if err != nil {
@@ -104,10 +96,7 @@ func TestConfigCheckReportsCompletenessWithoutSecrets(t *testing.T) {
 	for _, want := range []string{
 		"daily-proxy-source: configured",
 		"daily-proxy-cache: configured",
-		"tailnet: enabled",
-		"tailnet-auth: configured",
 		"wireguard-configs: 1/1 available",
-		"tailnet-inbound-forwards: 1",
 		"direct-only: disabled",
 		"result: ready",
 	} {
@@ -115,7 +104,7 @@ func TestConfigCheckReportsCompletenessWithoutSecrets(t *testing.T) {
 			t.Fatalf("config-check output missing %q: %s", want, text)
 		}
 	}
-	for _, secret := range []string{providerSecret, authSecret, "private material"} {
+	for _, secret := range []string{providerSecret, "private material"} {
 		if strings.Contains(text, secret) {
 			t.Fatalf("config-check leaked secret %q: %s", secret, text)
 		}
@@ -176,7 +165,7 @@ func TestConfigCheckReportsMissingRuntimeInputsAsDegraded(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("MESHMUX_HOME", home)
 	path := filepath.Join(home, config.DefaultConfigPath)
-	if err := os.WriteFile(path, []byte(`{"tailscale":{"enabled":true}}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"name":"degraded"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -191,7 +180,7 @@ func TestConfigCheckReportsMissingRuntimeInputsAsDegraded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config-check error = %v", err)
 	}
-	if !strings.Contains(output.String(), "result: degraded:") || !strings.Contains(output.String(), "daily proxy") || !strings.Contains(output.String(), "auth key") {
+	if !strings.Contains(output.String(), "result: degraded:") || !strings.Contains(output.String(), "daily proxy") {
 		t.Fatalf("degraded config output = %s", output.String())
 	}
 }

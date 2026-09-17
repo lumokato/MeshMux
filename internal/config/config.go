@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -17,15 +16,33 @@ import (
 )
 
 const (
-	AppName                         = "MeshMux"
-	DefaultConfigPath               = "meshmux.local.json"
-	ExampleConfigPath               = "templates/meshmux.example.json"
-	DefaultMihomoRepo               = "lumokato/MeshMux"
-	DefaultMihomoReleaseTag         = ""
-	DefaultMihomoAssetPattern       = `mihomo-windows-amd64-compatible.*\.zip$`
-	LinuxMihomoAssetPattern         = `mihomo-linux-amd64-compatible.*\.gz$`
-	OfficialMihomoRepo              = "MetaCubeX/mihomo"
+	AppName                   = "MeshMux"
+	DefaultConfigPath         = "meshmux.local.json"
+	ExampleConfigPath         = "templates/meshmux.example.json"
+	DefaultMihomoRepo         = "MetaCubeX/mihomo"
+	DefaultMihomoReleaseTag   = ""
+	DefaultMihomoAssetPattern = `mihomo-windows-amd64-compatible.*\.zip$`
+	LinuxMihomoAssetPattern   = `mihomo-linux-amd64-compatible.*\.gz$`
+	DarwinMihomoAssetPattern  = `mihomo-darwin-amd64-compatible.*\.gz$`
+	// OfficialMihomoRepo is the upstream project. Core selection defaults to it.
+	OfficialMihomoRepo = DefaultMihomoRepo
+	// LegacyMihomoRepo is the patched fork MeshMux shipped while Tailnet
+	// handling lived inside the core. Tailnet is now the official Tailscale
+	// client's job, so configurations pointing at the fork migrate to upstream
+	// unless the user pinned an explicit SHA-256.
+	LegacyMihomoRepo                = "lumokato/MeshMux"
 	OfficialLinuxMihomoAssetPattern = `mihomo-linux-amd64-compatible.*\.gz$`
+)
+
+const (
+	// DefaultTailscaleRepo hosts rebuilds of the official tailscale binaries
+	// built from an upstream tag without source changes (upstream does not
+	// publish raw tailscaled binaries for Windows and macOS).
+	DefaultTailscaleRepo         = "lumokato/MeshMux"
+	DefaultTailscaleReleaseTag   = ""
+	DefaultTailscaleAssetPattern = `tailscale-windows-amd64-.*\.zip$`
+	LinuxTailscaleAssetPattern   = `tailscale-linux-amd64-.*\.tar\.gz$`
+	DarwinTailscaleAssetPattern  = `tailscale-darwin-amd64-.*\.zip$`
 )
 
 type Config struct {
@@ -77,27 +94,19 @@ type WireGuard struct {
 	Routes           []string `json:"routes"`
 }
 
+// Tailscale configures the bundled upstream tailscaled daemon. Tailnet
+// membership and inbound access belong to tailscaled; MeshMux supervises the
+// process and applies the desired state through the tailscale CLI.
 type Tailscale struct {
-	Enabled                bool             `json:"enabled"`
-	ControlURL             string           `json:"controlUrl"`
-	AuthKey                string           `json:"authKey"`
-	AuthKeyFile            string           `json:"authKeyFile"`
-	AcceptRoutes           bool             `json:"acceptRoutes"`
-	Ephemeral              bool             `json:"ephemeral"`
-	ExitNode               string           `json:"exitNode"`
-	ExitNodeAllowLANAccess bool             `json:"exitNodeAllowLanAccess"`
-	MagicDNSSuffix         string           `json:"magicDnsSuffix"`
-	Routes                 []string         `json:"routes"`
-	IPv6Routes             []string         `json:"ipv6Routes"`
-	Domains                []string         `json:"domains"`
-	InboundForwards        []InboundForward `json:"inboundForwards,omitempty"`
-}
-
-type InboundForward struct {
-	Name       string `json:"name"`
-	Network    string `json:"network"`
-	ListenPort int    `json:"listenPort"`
-	Target     string `json:"target"`
+	Enabled     bool   `json:"enabled"`
+	AuthKey     string `json:"authKey,omitempty"`
+	AuthKeyFile string `json:"authKeyFile,omitempty"`
+	Hostname    string `json:"hostname,omitempty"`
+	// AcceptRoutes is nil to follow the tailscale CLI's platform default.
+	AcceptRoutes *bool `json:"acceptRoutes,omitempty"`
+	// AcceptDNS defaults to false so MagicDNS does not take over the system
+	// resolver while mihomo is running.
+	AcceptDNS bool `json:"acceptDNS"`
 }
 
 type TUN struct {
@@ -148,6 +157,7 @@ type PublishTarget struct {
 type Components struct {
 	Mihomo    Component `json:"mihomo"`
 	Dashboard Component `json:"dashboard"`
+	Tailscale Component `json:"tailscale"`
 }
 
 type Component struct {
@@ -338,11 +348,13 @@ func IsBootstrapConfig(data []byte) bool {
 	if len(cfg.WireGuard.Configs) > 0 || len(cfg.WireGuard.Domains) > 0 || len(cfg.WireGuard.Routes) > 0 {
 		return false
 	}
-	if cfg.Tailscale.Enabled || strings.TrimSpace(cfg.Tailscale.AuthKey) != "" ||
-		strings.TrimSpace(cfg.Tailscale.AuthKeyFile) != "" || len(cfg.Tailscale.InboundForwards) > 0 ||
-		strings.TrimSpace(cfg.Tailscale.ExitNode) != "" || strings.TrimSpace(cfg.Tailscale.MagicDNSSuffix) != "" {
+	if cfg.Tailscale.Enabled || strings.TrimSpace(cfg.Tailscale.AuthKey) != "" || strings.TrimSpace(cfg.Tailscale.AuthKeyFile) != "" {
 		return false
 	}
+	// Only fields the installer template leaves empty are checked here. The
+	// template already carries real defaults for ports, TUN, DNS and rules, so
+	// comparing those against zero values would misclassify the template itself
+	// as a real configuration.
 	return true
 }
 
@@ -425,16 +437,7 @@ func (c *Config) applyDefaults(goos string) {
 	if c.Rules.DirectDomains == nil {
 		c.Rules.DirectDomains = []string{"localhost", "*.local"}
 	}
-	if c.Tailscale.ControlURL == "" {
-		c.Tailscale.ControlURL = "https://controlplane.tailscale.com"
-	}
-	if c.Tailscale.Routes == nil {
-		c.Tailscale.Routes = []string{"100.64.0.0/10"}
-	}
-	if c.Tailscale.IPv6Routes == nil {
-		c.Tailscale.IPv6Routes = []string{"fd7a:115c:a1e0::/48"}
-	}
-	if c.Components.Mihomo.Repo == "" || legacyMihomoComponent(goos, c.Components.Mihomo) {
+	if c.Components.Mihomo.Repo == "" || legacyMihomoComponent(c.Components.Mihomo) {
 		c.Components.Mihomo.Repo = DefaultMihomoRepo
 		c.Components.Mihomo.ReleaseTag = DefaultMihomoReleaseTag
 		c.Components.Mihomo.AssetPattern = DefaultMihomoAssetPatternFor(goos)
@@ -455,8 +458,20 @@ func (c *Config) applyDefaults(goos string) {
 	if c.Components.Dashboard.AssetPattern == "" {
 		c.Components.Dashboard.AssetPattern = `compressed-dist\.tgz$`
 	}
+	if c.Components.Tailscale.Path == "" {
+		c.Components.Tailscale.Path = DefaultTailscaledPathFor(goos)
+	}
+	if c.Components.Tailscale.Repo == "" {
+		c.Components.Tailscale.Repo = DefaultTailscaleRepo
+	}
+	if c.Components.Tailscale.AssetPattern == "" {
+		c.Components.Tailscale.AssetPattern = DefaultTailscaleAssetPatternFor(goos)
+	}
+	if c.Tailscale.Hostname == "" {
+		c.Tailscale.Hostname = DefaultTargetNameFor(goos) + "-meshmux"
+	}
 	c.deriveSetup()
-	c.deriveTailnetDomains()
+	c.deriveSubStoreDNS()
 	c.applySetup(goos)
 }
 
@@ -465,31 +480,37 @@ func defaultMihomoComponent(component Component) bool {
 		return false
 	}
 	switch component.AssetPattern {
-	case "", DefaultMihomoAssetPattern, LinuxMihomoAssetPattern:
+	case "", DefaultMihomoAssetPattern, LinuxMihomoAssetPattern, DarwinMihomoAssetPattern:
 		return true
 	default:
 		return false
 	}
 }
 
-func legacyMihomoComponent(goos string, component Component) bool {
-	// Upgrade the released default, but preserve explicitly pinned/custom cores.
-	if component.Repo == DefaultMihomoRepo && component.ReleaseTag == "mihomo-v1.19.29-meshmux.1" && component.SHA256 == "" {
+// legacyMihomoComponent reports whether the stored core selection points at the
+// patched fork MeshMux shipped while Tailnet handling lived inside the core.
+// Those selections migrate to upstream mihomo unless the user pinned a hash or
+// wrote an asset pattern of their own.
+func legacyMihomoComponent(component Component) bool {
+	if strings.TrimSpace(component.SHA256) != "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(component.Repo), LegacyMihomoRepo) {
 		switch component.AssetPattern {
-		case "", `mihomo-windows-amd64-compatible-v1\.19\.29-meshmux\.1\.zip$`, `mihomo-linux-amd64-compatible-v1\.19\.29-meshmux\.1\.gz$`:
+		case "", DefaultMihomoAssetPattern, LinuxMihomoAssetPattern, DarwinMihomoAssetPattern,
+			`mihomo-windows-amd64-compatible-v1\.19\.29-meshmux\.1\.zip$`,
+			`mihomo-linux-amd64-compatible-v1\.19\.29-meshmux\.1\.gz$`,
+			`mihomo-windows-amd64-compatible-v1\.19\.30-meshmux\.1\.zip$`,
+			`mihomo-linux-amd64-compatible-v1\.19\.30-meshmux\.1\.gz$`:
 			return true
+		default:
+			return false
 		}
 	}
-	switch component.Repo {
-	case OfficialMihomoRepo:
-		switch component.AssetPattern {
-		case `mihomo-windows-amd64-compatible.*\.zip$`, `mihomo-windows-amd64.*\.zip$`:
-			return true
-		case "":
-			return goos == "windows"
-		}
-	}
-	return false
+	// A superseded upstream default: upstream no longer publishes an asset that
+	// matches this pattern, so it has to move to the platform-aware default.
+	return strings.EqualFold(strings.TrimSpace(component.Repo), DefaultMihomoRepo) &&
+		component.AssetPattern == `mihomo-windows-amd64.*\.zip$`
 }
 
 func DefaultMihomoPath() string {
@@ -510,10 +531,49 @@ func isKnownDefaultMihomoPath(path string) bool {
 }
 
 func DefaultMihomoAssetPatternFor(goos string) string {
-	if goos != "linux" {
+	switch goos {
+	case "linux":
+		return LinuxMihomoAssetPattern
+	case "darwin":
+		return DarwinMihomoAssetPattern
+	default:
 		return DefaultMihomoAssetPattern
 	}
-	return LinuxMihomoAssetPattern
+}
+
+func DefaultTailscaledPath() string {
+	return DefaultTailscaledPathFor(runtime.GOOS)
+}
+
+func DefaultTailscaledPathFor(goos string) string {
+	name := "tailscaled"
+	if goos == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join("bin", name)
+}
+
+func DefaultTailscaleCLIPathFor(goos string) string {
+	name := "tailscale"
+	if goos == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join("bin", name)
+}
+
+func DefaultTailscaleCLIPath() string {
+	return DefaultTailscaleCLIPathFor(runtime.GOOS)
+}
+
+func DefaultTailscaleAssetPatternFor(goos string) string {
+	switch goos {
+	case "linux":
+		return LinuxTailscaleAssetPattern
+	case "darwin":
+		return DarwinTailscaleAssetPattern
+	default:
+		return DefaultTailscaleAssetPattern
+	}
 }
 
 func mihomoAssetPatternFor(goos, repo string) string {
@@ -538,43 +598,6 @@ func (c *Config) Validate() error {
 		}
 		if number == c.Ports.Mixed {
 			return errors.New("controller and mixed ports must differ")
-		}
-	}
-	if len(c.Tailscale.InboundForwards) > 0 && !c.Tailscale.Enabled {
-		return errors.New("Tailnet 入站转发要求先启用 Tailscale")
-	}
-	names := make(map[string]struct{}, len(c.Tailscale.InboundForwards))
-	listeners := make(map[string]struct{}, len(c.Tailscale.InboundForwards))
-	for index := range c.Tailscale.InboundForwards {
-		forward := &c.Tailscale.InboundForwards[index]
-		forward.Name = strings.TrimSpace(forward.Name)
-		forward.Network = strings.ToLower(strings.TrimSpace(forward.Network))
-		forward.Target = strings.TrimSpace(forward.Target)
-		if forward.Name == "" {
-			return fmt.Errorf("Tailnet 入站转发第 %d 项缺少名称", index+1)
-		}
-		if _, exists := names[forward.Name]; exists {
-			return fmt.Errorf("Tailnet 入站转发名称重复: %s", forward.Name)
-		}
-		names[forward.Name] = struct{}{}
-		if forward.Network != "tcp" && forward.Network != "udp" {
-			return fmt.Errorf("Tailnet 入站转发 %s 的协议必须是 tcp 或 udp", forward.Name)
-		}
-		if forward.ListenPort < 1 || forward.ListenPort > 65535 {
-			return fmt.Errorf("Tailnet 入站转发 %s 的监听端口必须在 1-65535", forward.Name)
-		}
-		listenerKey := forward.Network + "/" + strconv.Itoa(forward.ListenPort)
-		if _, exists := listeners[listenerKey]; exists {
-			return fmt.Errorf("Tailnet 入站端口重复: %s", listenerKey)
-		}
-		listeners[listenerKey] = struct{}{}
-		host, port, err := net.SplitHostPort(forward.Target)
-		if err != nil || strings.TrimSpace(host) == "" {
-			return fmt.Errorf("Tailnet 入站转发 %s 的目标必须是 host:port", forward.Name)
-		}
-		portNumber, err := strconv.Atoi(port)
-		if err != nil || portNumber < 1 || portNumber > 65535 {
-			return fmt.Errorf("Tailnet 入站转发 %s 的目标端口必须在 1-65535", forward.Name)
 		}
 	}
 	return nil
@@ -626,17 +649,25 @@ func DefaultMihomoTarget() Target {
 }
 
 func DefaultMihomoTargetFor(goos string) Target {
-	if DefaultTargetNameFor(goos) == "linux" {
+	switch DefaultTargetNameFor(goos) {
+	case "linux":
 		return Target{Name: "linux", Type: "linux-mihomo", Hostname: "linux-meshmux", Output: filepath.Join("profiles", "linux.yaml")}
+	case "darwin":
+		return Target{Name: "darwin", Type: "darwin-mihomo", Hostname: "mac-meshmux", Output: filepath.Join("profiles", "darwin.yaml")}
+	default:
+		return Target{Name: "windows", Type: "windows-mihomo", Hostname: "windows-meshmux", Output: filepath.Join("profiles", "windows.yaml")}
 	}
-	return Target{Name: "windows", Type: "windows-mihomo", Hostname: "windows-meshmux", Output: filepath.Join("profiles", "windows.yaml")}
 }
 
 func DefaultTargetNameFor(goos string) string {
-	if goos == "linux" {
+	switch goos {
+	case "linux":
 		return "linux"
+	case "darwin":
+		return "darwin"
+	default:
+		return "windows"
 	}
-	return "windows"
 }
 
 func (c *Config) deriveSetup() {
@@ -673,21 +704,20 @@ func (c *Config) deriveSetup() {
 	}
 }
 
-func (c *Config) deriveTailnetDomains() {
+// The installer template carries a placeholder DNS policy key for the Sub-Store
+// host; replace it with the domain derived from the configured Sub-Store or
+// provider URL.
+func (c *Config) deriveSubStoreDNS() {
 	root := rootDomain(c.Setup.SubStoreURL)
 	if root == "" {
 		root = rootDomain(c.Setup.ProviderURL)
 	}
-	if root == "" {
+	if root == "" || c.DNS.NameserverPolicy == nil {
 		return
 	}
-	domain := "*.i." + root
-	c.Tailscale.Domains = replaceOrAppend(c.Tailscale.Domains, "*.i.example.com", domain)
-	if c.DNS.NameserverPolicy != nil {
-		if values, ok := c.DNS.NameserverPolicy["+.i.example.com"]; ok {
-			delete(c.DNS.NameserverPolicy, "+.i.example.com")
-			c.DNS.NameserverPolicy["+.i."+root] = values
-		}
+	if values, ok := c.DNS.NameserverPolicy["+.i.example.com"]; ok {
+		delete(c.DNS.NameserverPolicy, "+.i.example.com")
+		c.DNS.NameserverPolicy["+.i."+root] = values
 	}
 }
 
@@ -705,25 +735,6 @@ func rootDomain(raw string) string {
 		return ""
 	}
 	return strings.Join(parts[len(parts)-2:], ".")
-}
-
-func replaceOrAppend(values []string, placeholder, value string) []string {
-	if value == "" {
-		return values
-	}
-	if len(values) == 0 {
-		return []string{value}
-	}
-	for i, item := range values {
-		if item == value {
-			return values
-		}
-		if item == placeholder {
-			values[i] = value
-			return values
-		}
-	}
-	return append(values, value)
 }
 
 func (c *Config) deriveSubStoreFromAPIURL(raw string) {

@@ -12,26 +12,15 @@ import (
 	"github.com/meshmux/meshmux/internal/config"
 )
 
+// postStartNetwork clears the TUN adapter's DNS servers when DNS is disabled in
+// the configuration. Route installation is left to mihomo's own auto-route
+// handling; MeshMux no longer installs routes for another tunnel's address
+// space.
 func postStartNetwork(parent context.Context, cfg *config.Config) error {
-	if cfg == nil || !cfg.TUN.Enabled {
+	if cfg == nil || !cfg.TUN.Enabled || !dnsDisabled(cfg) {
 		return nil
 	}
-
-	routes := make([]string, 0, len(cfg.Tailscale.Routes))
-	for _, route := range cfg.Tailscale.Routes {
-		route = strings.TrimSpace(route)
-		if route == "" || strings.Contains(route, ":") {
-			continue
-		}
-		routes = append(routes, route)
-	}
-
-	clearDNS := dnsDisabled(cfg)
-	addRoutes := !cfg.TUN.AutoRoute && len(routes) > 0
-	if !clearDNS && !addRoutes {
-		return nil
-	}
-	script := buildPostStartNetworkScript(routes, clearDNS, addRoutes)
+	script := buildPostStartNetworkScript()
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
@@ -55,22 +44,10 @@ func dnsDisabled(cfg *config.Config) bool {
 	return cfg.DNS.Enabled != nil && !*cfg.DNS.Enabled
 }
 
-func buildPostStartNetworkScript(routes []string, clearDNS, addRoutes bool) string {
-	var routeList strings.Builder
-	for _, route := range routes {
-		routeList.WriteString("  ")
-		routeList.WriteString(psQuote(route))
-		routeList.WriteByte('\n')
-	}
-
-	return fmt.Sprintf(`
+func buildPostStartNetworkScript() string {
+	return `
 $ErrorActionPreference = 'Continue'
 $alias = 'Meta'
-$gateway = '198.18.0.2'
-$clearDNS = %s
-$addRoutes = %s
-$routes = @(
-%s)
 
 $adapter = $null
 $tunIp = $null
@@ -92,40 +69,12 @@ if ($adapter.Status -ne 'Up' -or -not $tunIp) {
   exit 0
 }
 
-if ($clearDNS) {
-  netsh interface ipv4 set dnsservers name="$alias" source=static address=none register=none validate=no | Out-Null
-  netsh interface ipv6 set dnsservers name="$alias" source=static address=none register=none validate=no | Out-Null
-  netsh interface ipv4 delete dnsservers name="$alias" all | Out-Null
-  netsh interface ipv6 delete dnsservers name="$alias" all | Out-Null
-  Set-NetIPInterface -InterfaceAlias $alias -AddressFamily IPv4 -InterfaceMetric 5000 -ErrorAction SilentlyContinue
-  Set-NetIPInterface -InterfaceAlias $alias -AddressFamily IPv6 -InterfaceMetric 5000 -ErrorAction SilentlyContinue
-  Write-Output "Meta adapter DNS cleared."
-}
-
-if ($addRoutes) {
-  foreach ($cidr in $routes) {
-    if (-not $cidr) { continue }
-    Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-      Where-Object { $_.DestinationPrefix -eq [string]$cidr -and $_.InterfaceAlias -eq $alias } |
-      Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
-    try {
-      New-NetRoute -DestinationPrefix ([string]$cidr) -InterfaceAlias $alias -NextHop $gateway -RouteMetric 0 -ErrorAction Stop | Out-Null
-      Write-Output "Added TUN route: $cidr -> $alias via $gateway"
-    } catch {
-      Write-Warning "Failed to add TUN route $cidr -> $alias via ${gateway}: $($_.Exception.Message)"
-    }
-  }
-}
-`, psBool(clearDNS), psBool(addRoutes), routeList.String())
-}
-
-func psBool(value bool) string {
-	if value {
-		return "$true"
-	}
-	return "$false"
-}
-
-func psQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+netsh interface ipv4 set dnsservers name="$alias" source=static address=none register=none validate=no | Out-Null
+netsh interface ipv6 set dnsservers name="$alias" source=static address=none register=none validate=no | Out-Null
+netsh interface ipv4 delete dnsservers name="$alias" all | Out-Null
+netsh interface ipv6 delete dnsservers name="$alias" all | Out-Null
+Set-NetIPInterface -InterfaceAlias $alias -AddressFamily IPv4 -InterfaceMetric 5000 -ErrorAction SilentlyContinue
+Set-NetIPInterface -InterfaceAlias $alias -AddressFamily IPv6 -InterfaceMetric 5000 -ErrorAction SilentlyContinue
+Write-Output "Meta adapter DNS cleared."
+`
 }

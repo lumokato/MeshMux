@@ -135,33 +135,18 @@ func TestLinuxProfileBindsDNSOnlyToLoopback(t *testing.T) {
 	}
 }
 
-func TestTailscaleInboundForwardsOnlyRenderForWindows(t *testing.T) {
+func TestDarwinProfileBindsDNSOnlyToLoopback(t *testing.T) {
 	enabledDNS := true
 	cfg := &config.Config{
 		Ports: config.Ports{Mixed: 2080, Controller: "127.0.0.1:9090"},
 		DNS:   config.DNS{Enabled: &enabledDNS},
-		Tailscale: config.Tailscale{
-			Enabled: true,
-			InboundForwards: []config.InboundForward{{
-				Name: "windows-ssh", Network: "tcp", ListenPort: 22, Target: "127.0.0.1:22",
-			}},
-		},
 	}
-	windows, err := Render(cfg, config.Target{Name: "windows", Type: "windows-mihomo", Hostname: "windows-meshmux"})
+	text, err := Render(cfg, config.Target{Name: "darwin", Type: "darwin-mihomo", Output: "profiles/darwin.yaml"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"inbound-forwards:", "name: 'windows-ssh'", "listen-port: 22", "target: '127.0.0.1:22'"} {
-		if !strings.Contains(windows, want) {
-			t.Fatalf("windows profile missing %q:\n%s", want, windows)
-		}
-	}
-	mobile, err := Render(cfg, config.Target{Name: "mobile", Type: "mobile-mihomo", Hostname: "mobile-meshmux"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(mobile, "inbound-forwards:") {
-		t.Fatalf("mobile profile contains Windows inbound forwards:\n%s", mobile)
+	if !strings.Contains(text, "  listen: 127.0.0.1:1053\n") {
+		t.Fatalf("darwin profile DNS is not loopback-only:\n%s", text)
 	}
 }
 

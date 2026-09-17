@@ -21,7 +21,7 @@ func TestIndexHTMLIsChineseFormUI(t *testing.T) {
 	if !strings.Contains(html, "let mode = 'tun';") {
 		t.Fatal("new configuration UI does not default to TUN")
 	}
-	for _, want := range []string{"快速设置", "Sub-Store 地址", "后端名", "生成并上传手机配置", "导入 WireGuard 配置", "multiple", "状态概览", "Tailnet 入站转发", "tsInboundForwards"} {
+	for _, want := range []string{"快速设置", "Sub-Store 地址", "后端名", "导入 .conf", "multiple", "状态概览"} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("rendered HTML missing %q", want)
 		}
@@ -41,7 +41,6 @@ func TestPlatformUIRendersLinuxRuntimeWithoutSystemProxy(t *testing.T) {
 		"const runtimeTarget = 'linux'",
 		"type:'linux-mihomo'",
 		"output:'profiles/linux.yaml'",
-		"linux-ssh,tcp,22,127.0.0.1:22",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("Linux HTML missing %q", want)
@@ -174,78 +173,20 @@ func TestTUNStatusUsesPlatformRuntimeEvidence(t *testing.T) {
 	}
 }
 
-func TestTailnetStatusSaysRuntimeNeedsVerificationWithoutEvidence(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Tailscale.Enabled = true
-	cfg.Tailscale.AuthKey = "not-a-real-key"
-	status := buildStatus(cfg)
-	for _, item := range status.Items {
-		if item.Label != "Tailnet" {
-			continue
-		}
-		if item.Value != "已配置，运行态需验证" || item.State != "warn" {
-			t.Fatalf("Tailnet status = %+v", item)
-		}
-		return
+func TestTailnetStatusItemStates(t *testing.T) {
+	disabled := &config.Config{}
+	if item := tailscaleStatusItem(disabled); item.Value != "关闭" || item.State != "muted" {
+		t.Fatalf("disabled tailnet item = %+v", item)
 	}
-	t.Fatal("Tailnet status item missing")
-}
 
-func TestTailnetStateValid(t *testing.T) {
-	dir := t.TempDir()
-	if tailnetStateValid(dir) {
-		t.Fatal("missing state reported valid")
-	}
-	data := []byte(`{"_machinekey":"machine","_current-profile":"current","_profiles":"profiles"}`)
-	if err := os.WriteFile(filepath.Join(dir, "tailscaled.state"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if !tailnetStateValid(dir) {
-		t.Fatal("complete state reported invalid")
-	}
-}
-
-func TestRecentTailnetFailureRequiresRepeatedRecentErrors(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mihomo.out.log")
-	now := time.Date(2026, 8, 13, 15, 0, 0, 0, time.FixedZone("HKT", 8*60*60))
-	lines := ""
-	for second := 1; second <= 3; second++ {
-		lines += now.Add(time.Duration(-second)*time.Second).Format(`time="2006-01-02T15:04:05.999999999Z07:00"`) + ` level=warning msg="[TCP] dial TS error: context deadline exceeded"` + "\n"
-	}
-	if err := os.WriteFile(path, []byte(lines), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if got := recentTailnetFailure(path, now); got != "近期 Tailnet 请求持续失败" {
-		t.Fatalf("recent failure = %q", got)
-	}
-	if got := recentTailnetFailure(path, now.Add(3*time.Minute)); got != "" {
-		t.Fatalf("stale failure = %q", got)
-	}
-}
-
-func TestRecentTailnetFailureReportsNoState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mihomo.out.log")
-	now := time.Now()
-	line := now.Format(`time="2006-01-02T15:04:05.999999999Z07:00"`) + ` msg="Authkey is set; but state is NoState"`
-	if err := os.WriteFile(path, []byte(line), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if got := recentTailnetFailure(path, now); got != "Tailnet 身份状态未加载" {
-		t.Fatalf("NoState failure = %q", got)
-	}
-}
-
-func TestRecentTailnetEvidencePrefersNewerSuccess(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mihomo.out.log")
-	now := time.Now()
-	lines := now.Add(-time.Second).Format(`time="2006-01-02T15:04:05.999999999Z07:00"`) + ` msg="Authkey is set; but state is NoState"` + "\n" +
-		now.Format(`time="2006-01-02T15:04:05.999999999Z07:00"`) + ` msg="vault.ops.lumokato.com using TS[Tailnet]"`
-	if err := os.WriteFile(path, []byte(lines), 0600); err != nil {
-		t.Fatal(err)
-	}
-	evidence := recentTailnetEvidence(path, now)
-	if !evidence.connected || evidence.detail != "" {
-		t.Fatalf("Tailnet evidence = %+v", evidence)
+	// A missing tailscale binary must surface as an error state rather than
+	// being silently omitted from the status page.
+	enabled := &config.Config{}
+	enabled.Tailscale.Enabled = true
+	enabled.Components.Tailscale.Path = filepath.Join(t.TempDir(), "missing", "tailscaled.exe")
+	item := tailscaleStatusItem(enabled)
+	if item.Value != "守护进程未运行" || item.State != "err" {
+		t.Fatalf("missing-daemon tailnet item = %+v", item)
 	}
 }
 
@@ -327,7 +268,7 @@ func TestPlatformUIForCurrentRuntime(t *testing.T) {
 	}
 }
 
-func TestConfigAPIRejectsInvalidInboundForward(t *testing.T) {
+func TestConfigAPIRejectsInvalidConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "meshmux.local.json")
 	data, err := json.Marshal(config.Config{Name: "before"})
@@ -347,10 +288,9 @@ func TestConfigAPIRejectsInvalidInboundForward(t *testing.T) {
 		_ = server.Shutdown(ctx)
 	}()
 
-	invalid := config.Config{Name: "invalid", Tailscale: config.Tailscale{
-		Enabled:         true,
-		InboundForwards: []config.InboundForward{{Name: "ssh", Network: "tcp", ListenPort: 22, Target: "invalid"}},
-	}}
+	// The controller is unauthenticated, so Validate rejects anything that is
+	// not on the loopback interface.
+	invalid := config.Config{Name: "invalid", Ports: config.Ports{Mixed: 2080, Controller: "0.0.0.0:9090"}}
 	body, err := json.Marshal(map[string]any{"config": invalid})
 	if err != nil {
 		t.Fatal(err)
@@ -552,7 +492,7 @@ func TestStatusAPIContainsCommonItems(t *testing.T) {
 	for _, item := range payload.Items {
 		labels[item.Label] = true
 	}
-	for _, want := range []string{"核心进程", "TUN", "系统代理", "开机自启", "混合端口", "控制接口", "订阅", "Tailnet", "WireGuard"} {
+	for _, want := range []string{"核心进程", "TUN", "系统代理", "开机自启", "混合端口", "控制接口", "订阅", "WireGuard", "Tailnet"} {
 		if !labels[want] {
 			t.Fatalf("status missing %q in %+v", want, payload.Items)
 		}

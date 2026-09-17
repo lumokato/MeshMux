@@ -56,7 +56,9 @@ func SuperviseContext(ctx context.Context, cfg *config.Config, profile string, r
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return runManaged(ctx, cfg, profile, true, false, ready)
+	return withTailscaleSupervision(ctx, cfg, func() error {
+		return runManaged(ctx, cfg, profile, true, false, ready)
+	})
 }
 
 func ServiceContext(ctx context.Context, cfg *config.Config, profile string, ready func(int) error) error {
@@ -70,7 +72,9 @@ func RunContext(ctx context.Context, cfg *config.Config, profile string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return runManaged(ctx, cfg, profile, true, true, nil)
+	return withTailscaleSupervision(ctx, cfg, func() error {
+		return runManaged(ctx, cfg, profile, true, true, nil)
+	})
 }
 
 func runManaged(ctx context.Context, cfg *config.Config, profile string, supervise, failOnExit bool, ready func(int) error) error {
@@ -141,8 +145,8 @@ func runManaged(ctx context.Context, cfg *config.Config, profile string, supervi
 	unlock()
 	released = true
 	// Process creation is the only synchronous startup gate. TUN creation,
-	// Tailnet login, controller reachability and route/DNS cleanup are runtime
-	// states and must not delay or invalidate service registration.
+	// controller reachability and route/DNS cleanup are runtime states and
+	// must not delay or invalidate service registration.
 	if ready != nil {
 		if err := ready(process.pid); err != nil {
 			_ = Stop(cfg)
@@ -271,6 +275,11 @@ func stopManaged(cfg *config.Config) error {
 		return errors.New("config is required")
 	}
 	ports := mihomoPorts(cfg)
+	// A leftover core from another MeshMux location keeps the ports busy and
+	// makes the owned core exit on every start. Reclaim first, then stop.
+	if err := reclaimForeignCores(cfg); err != nil {
+		appendRunnerLog("回收遗留 mihomo 实例: %v", err)
+	}
 	deadline := time.Now().Add(stopProcessTimeout)
 	var lastKillErr error
 	var quietSince time.Time
@@ -504,6 +513,9 @@ func prepareMihomo(cfg *config.Config, syncBundled bool) (string, error) {
 			return "", fmt.Errorf("mihomo not found at %s and bundled copy is unavailable: %w", target, copyErr)
 		}
 	}
+	// The TUN driver must accompany every core copy; a relocated core without it
+	// silently loses TUN support.
+	EnsureWintunBeside(target)
 	return target, nil
 }
 
