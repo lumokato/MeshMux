@@ -83,7 +83,7 @@ func (nativeProcessSystem) listeningProcesses(ports []int) ([]portOwner, error) 
 func (nativeProcessSystem) kill(pid int) error {
 	cmd := hiddenCommand("taskkill", "/PID", strconv.Itoa(pid), "/F", "/T")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("停止 mihomo PID %d 失败: %w: %s", pid, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("停止进程 PID %d 失败: %w: %s", pid, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

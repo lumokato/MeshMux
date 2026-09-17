@@ -185,7 +185,11 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 		if tsCore == nil {
 			return nil
 		}
-		err := stopServiceCore(tsCore, 5*time.Second)
+		// The supervisor kills the daemon and waits for the process to disappear
+		// before it reports a stop, so this budget has to cover that wait. A
+		// shorter one reported "timed out" while the stop was still in flight and
+		// turned a working stop into a service failure.
+		err := stopServiceCore(tsCore, runner.TailscaledStopBudget()+5*time.Second)
 		if err != nil {
 			return err
 		}
@@ -394,7 +398,7 @@ var runTailscaleSupervision = func(ctx context.Context, cfg *config.Config) erro
 
 func startTailscaleService(cfg *config.Config) *serviceCore {
 	ctx, cancel := context.WithCancel(context.Background())
-	core := &serviceCore{cancel: cancel, done: make(chan struct{})}
+	core := &serviceCore{cancel: cancel, done: make(chan struct{}), startedAt: time.Now()}
 	go func() {
 		defer close(core.done)
 		core.err = runTailscaleSupervision(ctx, cfg)
