@@ -686,12 +686,14 @@ func (s *Server) actionAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		_ = runner.SetProxyIntent(true)
 		message = "系统代理已开启"
 	case "proxy-off":
 		if err := runner.Proxy("off", cfg.Ports.Mixed); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		_ = runner.SetProxyIntent(false)
 		message = "系统代理已关闭"
 	case "dashboard":
 		if err := runner.Dashboard(cfg); err != nil {

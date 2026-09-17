@@ -43,18 +43,49 @@ func (b *windowsBackend) InitialStart() error {
 	// The tray starts or observes the core only. Upstream reachability and proxy
 	// selection are independent user-visible runtime states.
 	if winservice.Installed() {
+		b.restoreProxyIntent()
 		return nil
 	}
 	return b.withConfig(func(cfg *config.Config) error {
 		if runner.IsRunning(cfg) {
+			b.restoreProxyIntent()
 			return nil
 		}
 		profile, err := generator.GenerateNamed(cfg, "windows")
 		if err != nil {
 			return err
 		}
-		return runner.Start(cfg, profile)
+		if err := runner.Start(cfg, profile); err != nil {
+			return err
+		}
+		b.restoreProxyIntent()
+		return nil
 	})
+}
+
+// restoreProxyIntent re-enables the system proxy when the user's last explicit
+// choice was "on". The registry write must happen in the tray because it runs
+// as the interactive user; the LocalSystem service cannot touch the user's
+// proxy settings. Errors are non-fatal — a stale intent must never block the
+// core from running.
+func (b *windowsBackend) restoreProxyIntent() {
+	if !runner.ProxyWanted() {
+		return
+	}
+	cfg, _, err := config.Load(b.cfgPath)
+	if err != nil {
+		return
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := runner.Proxy("on", cfg.Ports.Mixed); err == nil {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	// Proxy stayed unavailable for 15s; drop the auto-on so the tray does not
+	// retry forever in the background.
+	_ = runner.AppendDiagnosticLog(filepath.Join(config.LocalDataDir(), "logs", "tray.log"), "restoreProxyIntent: system proxy stayed unavailable for 15s")
 }
 
 func (b *windowsBackend) State() (trayState, error) {
@@ -126,9 +157,15 @@ func (b *windowsBackend) RestartCore() error {
 func (b *windowsBackend) ToggleSystemProxy() error {
 	return b.withConfig(func(cfg *config.Config) error {
 		if runner.ProxyEnabled() {
-			return runner.Proxy("off", cfg.Ports.Mixed)
+			if err := runner.Proxy("off", cfg.Ports.Mixed); err != nil {
+				return err
+			}
+			return runner.SetProxyIntent(false)
 		}
-		return runner.Proxy("on", cfg.Ports.Mixed)
+		if err := runner.Proxy("on", cfg.Ports.Mixed); err != nil {
+			return err
+		}
+		return runner.SetProxyIntent(true)
 	})
 }
 
