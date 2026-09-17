@@ -284,6 +284,16 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 				coreRetry.schedule()
 				continue
 			}
+			// Sleep also kills the tailscaled daemon's WireGuard sessions and the
+			// proxy mapping it dials through, but a supervised daemon that survives
+			// the suspend never reports a failure. Restart it unconditionally: a
+			// daemon that was already gone simply makes stopTailscale a no-op, while
+			// keeping the stale one left the data plane dead until a manual restart.
+			appendServiceLog(h.configPath, "power resume: restarting tailscale")
+			if err := stopTailscale(); err != nil {
+				appendServiceLog(h.configPath, "restart tailscale after resume: "+err.Error())
+				continue
+			}
 			if err := startTailscale(); err != nil {
 				appendServiceLog(h.configPath, "power resume: tailscale: "+err.Error())
 				tailscaleRetry.schedule()
