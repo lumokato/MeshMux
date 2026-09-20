@@ -403,8 +403,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # Publication requires separate acceptance of the exact installer artifacts.
-          draft: true
+          draft: false
           name: MeshMux ${{ env.MESHMUX_VERSION }}
           body_path: release-notes.md
           files: release-assets/*
