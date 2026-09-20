@@ -31,6 +31,7 @@ type Server struct {
 	ConfigPath string
 	Token      string
 	URL        string
+	Version    string
 	server     *http.Server
 	done       chan error
 	operations sync.Mutex
@@ -116,8 +117,34 @@ type statusItem struct {
 }
 
 type statusPayload struct {
-	Items []statusItem `json:"items"`
-	Logs  []string     `json:"logs"`
+	Items   []statusItem        `json:"items"`
+	Logs    []string            `json:"logs"`
+	Version string              `json:"version,omitempty"`
+	Tailnet []tailscalePeerView `json:"tailnet,omitempty"`
+}
+
+// tailscalePeerView is the console-facing shape of a tailnet device. It is
+// rendered as a plain list, so the JSON field order doubles as display order.
+type tailscalePeerView struct {
+	Hostname string   `json:"hostname"`
+	DNSName  string   `json:"dnsName,omitempty"`
+	IPs      []string `json:"ips"`
+	Online   bool     `json:"online"`
+	Self     bool     `json:"self,omitempty"`
+}
+
+func tailscalePeerViews(peers []runner.TailscalePeer) []tailscalePeerView {
+	views := make([]tailscalePeerView, 0, len(peers))
+	for _, peer := range peers {
+		views = append(views, tailscalePeerView{
+			Hostname: peer.Hostname,
+			DNSName:  peer.DNSName,
+			IPs:      peer.TailscaleIPs,
+			Online:   peer.Online,
+			Self:     peer.Self,
+		})
+	}
+	return views
 }
 
 func (s *Server) statusAPI(w http.ResponseWriter, r *http.Request) {
@@ -130,7 +157,23 @@ func (s *Server) statusAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, buildStatus(cfg))
+	payload := buildStatus(cfg)
+	if payload.Items == nil {
+		payload.Items = []statusItem{}
+	}
+	if s.Version != "" {
+		payload.Version = s.Version
+	}
+	// The device list rides along with the status the console already polls;
+	// when the daemon is down it is simply absent instead of failing the call.
+	if cfg.Tailscale.Enabled {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if status, err := runner.TailscaleStatus(ctx, cfg); err == nil {
+			payload.Tailnet = tailscalePeerViews(status.Peers)
+		}
+	}
+	writeJSON(w, payload)
 }
 
 func buildStatus(cfg *config.Config) statusPayload {

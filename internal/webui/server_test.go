@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/meshmux/meshmux/internal/config"
+	"github.com/meshmux/meshmux/internal/runner"
 )
 
 func TestIndexHTMLIsChineseFormUI(t *testing.T) {
@@ -187,6 +188,67 @@ func TestTailnetStatusItemStates(t *testing.T) {
 	item := tailscaleStatusItem(enabled)
 	if item.Value != "守护进程未运行" || item.State != "err" {
 		t.Fatalf("missing-daemon tailnet item = %+v", item)
+	}
+}
+
+func TestStatusPayloadCarriesVersionAndTailnetPeers(t *testing.T) {
+	views := tailscalePeerViews([]runner.TailscalePeer{
+		{Hostname: "linux-box", DNSName: "linux-box.tail-scale.ts.net.", TailscaleIPs: []string{"100.64.0.2"}, Online: true},
+		{Hostname: "windows-meshmux", TailscaleIPs: []string{"100.64.0.1"}, Online: true, Self: true},
+	})
+	if len(views) != 2 {
+		t.Fatalf("views = %+v", views)
+	}
+	if views[0].Hostname != "linux-box" || !views[0].Online || views[0].Self {
+		t.Fatalf("peer view = %+v", views[0])
+	}
+	if !views[1].Self {
+		t.Fatalf("self flag lost: %+v", views[1])
+	}
+	data, err := json.Marshal(statusPayload{Items: []statusItem{{Label: "Tailnet", Value: "已连接", State: "ok"}}, Version: "0.5.0", Tailnet: views})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Version string              `json:"version"`
+		Tailnet []tailscalePeerView `json:"tailnet"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Version != "0.5.0" || len(decoded.Tailnet) != 2 || decoded.Tailnet[1].Hostname != "windows-meshmux" {
+		t.Fatalf("decoded payload = %+v", decoded)
+	}
+}
+
+func TestStatusAPIIncludesVersionWhenSet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meshmux.local.json")
+	if err := os.WriteFile(path, []byte(`{"name":"test"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	server, err := StartAt(path, "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Version = "9.9.9-test"
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	}()
+
+	statusURL := strings.Replace(server.URL, "/?token=", "/api/status?token=", 1)
+	resp, err := http.Get(statusURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var payload statusPayload
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Version != "9.9.9-test" {
+		t.Fatalf("status version = %q, want 9.9.9-test", payload.Version)
 	}
 }
 

@@ -188,3 +188,48 @@ func TestTailscaleAutoLoginSkipsWhenAlreadyRunning(t *testing.T) {
 		t.Fatalf("up ran %d times for an already logged-in daemon", upCalls)
 	}
 }
+
+func TestTailscaleStatusParsesPeersAndSelf(t *testing.T) {
+	oldCLI := runTailscaleCLIForTest
+	t.Cleanup(func() { runTailscaleCLIForTest = oldCLI })
+	runTailscaleCLIForTest = func(ctx context.Context, cfg *config.Config, args ...string) (string, error) {
+		return `{
+			"BackendState": "Running",
+			"Health": [""],
+			"Self": {
+				"HostName": "windows-meshmux",
+				"DNSName": "windows-meshmux.tail-scale.ts.net.",
+				"Online": true,
+				"TailscaleIPs": ["100.64.0.1"]
+			},
+			"Peer": {
+				"key-b": {"HostName": "phone", "DNSName": "phone.tail-scale.ts.net.", "Online": false, "TailscaleIPs": ["100.64.0.3"]},
+				"key-a": {"HostName": "linux-box", "DNSName": "linux-box.tail-scale.ts.net.", "Online": true, "TailscaleIPs": ["100.64.0.2", "fd7a:115c:a1e0::2"]}
+			}
+		}`, nil
+	}
+
+	cfg := &config.Config{}
+	cfg.Tailscale.Enabled = true
+	status, err := TailscaleStatus(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.BackendState != "Running" || !status.Online {
+		t.Fatalf("status = %+v", status)
+	}
+	if len(status.Peers) != 3 {
+		t.Fatalf("peers = %+v, want self + 2 devices", status.Peers)
+	}
+	// Sorted by hostname so the console list is stable.
+	if status.Peers[0].Hostname != "linux-box" || status.Peers[1].Hostname != "phone" || status.Peers[2].Hostname != "windows-meshmux" {
+		t.Fatalf("peer order = %+v", status.Peers)
+	}
+	self := status.Peers[2]
+	if !self.Self || !self.Online || len(self.TailscaleIPs) != 1 || self.TailscaleIPs[0] != "100.64.0.1" {
+		t.Fatalf("self entry = %+v", self)
+	}
+	if status.Peers[0].Online != true || status.Peers[1].Online != false {
+		t.Fatalf("peer online flags = %+v", status.Peers)
+	}
+}

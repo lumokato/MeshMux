@@ -33,6 +33,7 @@
     .mark { width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg, var(--accent), var(--violet)); color:white; display:grid; place-items:center; font-weight:800; font-size:16px; box-shadow:0 4px 10px -2px color-mix(in srgb, var(--accent) 45%, transparent); flex:none; }
     .brand strong { font-size:17px; letter-spacing:-.01em; }
     .brand .hint { margin-top:1px; }
+    .brand .ver { display:inline-block; margin-left:6px; padding:1px 7px; border-radius:999px; background:var(--soft); border:1px solid var(--line); color:var(--muted); font-size:11px; font-weight:600; font-family:ui-monospace, Consolas, monospace; vertical-align:1px; }
     nav { display:grid; gap:4px; }
     nav button { justify-content:flex-start; border:0; background:transparent; color:var(--muted); font-weight:500; border-radius:10px; padding:9px 12px; min-height:38px; }
     nav button svg { width:16px; height:16px; flex:none; opacity:.9; }
@@ -71,6 +72,14 @@
     .wglist { display:grid; gap:6px; }
     .wgrow { display:flex; align-items:center; gap:9px; padding:8px 12px; border:1px solid var(--line); border-radius:9px; background:var(--soft); font-size:13px; font-family:ui-monospace, Consolas, monospace; overflow-wrap:anywhere; }
     .wgrow svg { width:14px; height:14px; color:var(--ok); flex:none; }
+
+    .peers { display:grid; gap:6px; }
+    .peer { display:flex; align-items:center; gap:10px; padding:8px 12px; border:1px solid var(--line); border-radius:9px; background:var(--soft); font-size:13px; flex-wrap:wrap; }
+    .peer .dot { width:8px; height:8px; border-radius:50%; background:var(--muted); box-shadow:0 0 0 3px color-mix(in srgb, var(--muted) 18%, transparent); flex:none; }
+    .peer.online .dot { background:var(--ok); box-shadow:0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+    .peer .name { font-weight:600; }
+    .peer .tag { padding:1px 7px; border-radius:999px; background:color-mix(in srgb, var(--accent) 13%, transparent); color:var(--accent); font-size:11px; font-weight:600; }
+    .peer .ip { color:var(--muted); font-family:ui-monospace, Consolas, monospace; font-size:12px; overflow-wrap:anywhere; }
 
     .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px,1fr)); gap:14px; }
     label { display:grid; gap:7px; font-weight:600; font-size:13px; }
@@ -156,7 +165,7 @@
 <body>
   <div class="shell">
     <aside>
-      <div class="brand"><div class="mark">M</div><div><strong>MeshMux</strong><div class="hint">mihomo 管理面板</div></div></div>
+      <div class="brand"><div class="mark">M</div><div><strong>MeshMux<span id="appVersion" class="ver hidden"></span></strong><div class="hint">mihomo 管理面板</div></div></div>
       <nav>
         <button class="active" data-tab="quick" onclick="showTab('quick')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>快速设置</button>
         <button data-tab="advanced" onclick="showTab('advanced')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>高级</button>
@@ -189,6 +198,7 @@
             <h2>Tailscale</h2>
           </div>
           <div id="tsStatus" class="stateline">加载中...</div>
+          <div id="tsPeers" class="peers"></div>
           <div class="actions">
             <button id="tsConfigBtn" onclick="openModal('modalTailscale')">登记 Tailscale</button>
             <button id="tsLoginBtn" class="hidden primary" onclick="runAction('tailscale-up')">登录 Tailnet</button>
@@ -521,6 +531,24 @@
       const tsLoginBtn = el('tsLoginBtn');
       if (ts && ts.value === '需要登录') tsLoginBtn.classList.remove('hidden');
       else tsLoginBtn.classList.add('hidden');
+      if (data.version) {
+        const verEl = el('appVersion');
+        verEl.textContent = 'v' + String(data.version).replace(/^v/, '');
+        verEl.classList.remove('hidden');
+      }
+      renderTailnetPeers(data.tailnet || []);
+    }
+    function renderTailnetPeers(peers){
+      const host = el('tsPeers');
+      if (!peers.length) { host.innerHTML = ''; return; }
+      host.innerHTML = peers.map(p =>
+        '<div class="peer' + (p.online ? ' online' : '') + '">' +
+        '<span class="dot"></span>' +
+        '<span class="name">' + escapeHtml(p.hostname || '(未命名)') + '</span>' +
+        (p.self ? '<span class="tag">本机</span>' : '') +
+        '<span class="ip">' + escapeHtml((p.ips || []).join('  ')) + '</span>' +
+        '</div>'
+      ).join('');
     }
     async function responseText(r){
       const text = await r.text();

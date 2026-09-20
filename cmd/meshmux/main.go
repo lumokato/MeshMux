@@ -278,6 +278,7 @@ func serveHeadlessContext(ctx context.Context, args []string, output io.Writer) 
 	if err != nil {
 		return err
 	}
+	server.Version = version
 	if path := strings.TrimSpace(*urlFile); path != "" {
 		if err := writeURLFile(path, server.URL); err != nil {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
