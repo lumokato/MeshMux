@@ -25,11 +25,11 @@ env:
   DASHBOARD_SHA256: 076e05d2e3dc6641a0ec281aa4b97a18193fbcc379d139762c32d90adb22793c
   DEVELOPMENT_VERSION: 0.3.9
   # Upstream mihomo assets, hashed from
-  #   https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.30
+  #   https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.31
   # When bumping the version, re-hash the new assets and update these values.
-  MIHOMO_UPSTREAM_VERSION: v1.19.30
-  MIHOMO_UPSTREAM_WINDOWS_SHA256: 289FDE5E29D37A5B3326480590D8B3551C5BF7F8737290355C19BCE74D57A563
-  MIHOMO_UPSTREAM_LINUX_SHA256: DB214C7A2517E63C150D123178D16D102E03A241CCDAE4E5E07FFBE9CF56C6F9
+  MIHOMO_UPSTREAM_VERSION: v1.19.31
+  MIHOMO_UPSTREAM_WINDOWS_SHA256: 93D14E9A13B49B2F2D256202D02CC8D14A7C4695EDF084CAE0F941986BC9C218
+  MIHOMO_UPSTREAM_LINUX_SHA256: 04CF9F09671704F839DDBEE2E93069DC831A4123A75281E725D1D96AB9AC1AFC
   # Upstream tailscale rebuild: built from the official tag with no source
   # changes (see THIRD_PARTY_NOTICES.md). Upstream does not publish raw
   # tailscaled binaries for Windows and macOS, so MeshMux builds its own from
