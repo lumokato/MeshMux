@@ -57,6 +57,9 @@ var (
 	mAutostart *systray.MenuItem
 )
 
+// trayVersion is injected at build time with the same -X flag as the CLI.
+var trayVersion = "dev"
+
 func main() {
 	setDPIAwareness()
 	var elevateErr error
@@ -88,7 +91,7 @@ func main() {
 func onReady() {
 	systray.SetIcon(trayIcon())
 	systray.SetTitle("MeshMux")
-	systray.SetTooltip("MeshMux")
+	systray.SetTooltip("MeshMux " + trayVersion)
 	if startupErr != nil {
 		systray.SetTooltip("启动: " + startupErr.Error())
 	}
@@ -96,6 +99,8 @@ func onReady() {
 	mOpenConfig := systray.AddMenuItem("打开配置页面", "在浏览器打开 MeshMux 配置")
 	mOpenDashboard := systray.AddMenuItem("打开 MetaCubeXD", "打开 mihomo 面板")
 	systray.AddSeparator()
+	mAbout := systray.AddMenuItem("版本 "+trayVersion, "MeshMux 版本")
+	mAbout.Disable()
 	mCore = systray.AddMenuItemCheckbox("核心运行：关", "启动或停止 mihomo", false)
 	mRestart := systray.AddMenuItem("重启核心", "重新启动 mihomo")
 	if backend.Capabilities().SystemProxy {
@@ -112,8 +117,7 @@ func onReady() {
 	go runMenuLoop(mOpenConfig, mOpenDashboard, mRestart, mQuit)
 }
 
-func runMenuLoop(mOpenConfig, mOpenDashboard, mRestart, mQuit *systray.MenuItem) {
-	ticker := time.NewTicker(menuRefreshInterval)
+func runMenuLoop(mOpenConfig, mOpenDashboard, mRestart, mQuit *systray.MenuItem) {	ticker := time.NewTicker(menuRefreshInterval)
 	defer ticker.Stop()
 
 	initialDone := make(chan error, 1)

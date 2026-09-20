@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sort"
 	"time"
 	"unicode/utf8"
 
@@ -347,6 +348,10 @@ func truncateLogLine(line string) string {
 	return line[:cut] + "…"
 }
 
+// runTailscaleCLIForTest allows tests to fake CLI output; production code
+// always calls runTailscaleCLI directly.
+var runTailscaleCLIForTest = runTailscaleCLI
+
 func tailscaleCLIPath(cfg *config.Config) string {
 	dir := filepath.Dir(strings.TrimSpace(cfg.Components.Tailscale.Path))
 	if dir == "" || dir == "." {
@@ -501,12 +506,24 @@ type TailscaleState struct {
 	Online       bool
 	TailscaleIPs []string
 	Health       []string
+	Peers        []TailscalePeer
+}
+
+// TailscalePeer is one device in the tailnet as reported by "tailscale status".
+// Sharing it with the web console keeps the user from opening the Tailscale
+// admin site just to look up another machine's IP.
+type TailscalePeer struct {
+	Hostname     string
+	DNSName      string
+	TailscaleIPs []string
+	Online       bool
+	Self         bool
 }
 
 // TailscaleStatus queries the daemon through the private socket. An absent or
 // stopped daemon surfaces as an error; the caller decides how to display it.
 func TailscaleStatus(ctx context.Context, cfg *config.Config) (TailscaleState, error) {
-	out, err := runTailscaleCLI(ctx, cfg, "status", "--json")
+	out, err := runTailscaleCLIForTest(ctx, cfg, "status", "--json")
 	if err != nil {
 		return TailscaleState{}, fmt.Errorf("tailscale status 失败: %w", err)
 	}
@@ -514,9 +531,17 @@ func TailscaleStatus(ctx context.Context, cfg *config.Config) (TailscaleState, e
 		BackendState string   `json:"BackendState"`
 		Health       []string `json:"Health"`
 		Self         *struct {
+			HostName     string   `json:"HostName"`
+			DNSName      string   `json:"DNSName"`
 			Online       bool     `json:"Online"`
 			TailscaleIPs []string `json:"TailscaleIPs"`
 		} `json:"Self"`
+		Peer map[string]*struct {
+			HostName     string   `json:"HostName"`
+			DNSName      string   `json:"DNSName"`
+			Online       bool     `json:"Online"`
+			TailscaleIPs []string `json:"TailscaleIPs"`
+		} `json:"Peer"`
 	}
 	if err := json.Unmarshal([]byte(out), &payload); err != nil {
 		return TailscaleState{}, fmt.Errorf("tailscale status 输出无效: %w", err)
@@ -525,7 +550,30 @@ func TailscaleStatus(ctx context.Context, cfg *config.Config) (TailscaleState, e
 	if payload.Self != nil {
 		status.Online = payload.Self.Online
 		status.TailscaleIPs = payload.Self.TailscaleIPs
+		// The daemon reports the local node separately from the peers; merge
+		// it in so one list covers the whole tailnet.
+		status.Peers = append(status.Peers, TailscalePeer{
+			Hostname:     payload.Self.HostName,
+			DNSName:      payload.Self.DNSName,
+			TailscaleIPs: payload.Self.TailscaleIPs,
+			Online:       payload.Self.Online,
+			Self:         true,
+		})
 	}
+	for _, peer := range payload.Peer {
+		if peer == nil {
+			continue
+		}
+		status.Peers = append(status.Peers, TailscalePeer{
+			Hostname:     peer.HostName,
+			DNSName:      peer.DNSName,
+			TailscaleIPs: peer.TailscaleIPs,
+			Online:       peer.Online,
+		})
+	}
+	sort.Slice(status.Peers, func(i, j int) bool {
+		return status.Peers[i].Hostname < status.Peers[j].Hostname
+	})
 	return status, nil
 }
 
