@@ -540,15 +540,17 @@
     }
     function renderTailnetPeers(peers){
       const host = el('tsPeers');
-      if (!peers.length) { host.innerHTML = ''; return; }
-      host.innerHTML = peers.map(p =>
-        '<div class="peer' + (p.online ? ' online' : '') + '">' +
+      // Only online devices are worth a row; IPv4 only, IPv6 is noise here.
+      const rows = peers.filter(p => p.online).map(p => {
+        const ipv4 = (p.ips || []).filter(ip => ip.indexOf(':') < 0);
+        return '<div class="peer online">' +
         '<span class="dot"></span>' +
         '<span class="name">' + escapeHtml(p.hostname || '(未命名)') + '</span>' +
         (p.self ? '<span class="tag">本机</span>' : '') +
-        '<span class="ip">' + escapeHtml((p.ips || []).join('  ')) + '</span>' +
-        '</div>'
-      ).join('');
+        '<span class="ip">' + escapeHtml(ipv4.join('  ')) + '</span>' +
+        '</div>';
+      });
+      host.innerHTML = rows.join('');
     }
     async function responseText(r){
       const text = await r.text();

@@ -57,8 +57,9 @@ var (
 	mAutostart *systray.MenuItem
 )
 
-// trayVersion is injected at build time with the same -X flag as the CLI.
-var trayVersion = "dev"
+// version is injected at build time with the same -X main.version flag as the
+// CLI; keep the name in sync or the flag silently misses.
+var version = "dev"
 
 func main() {
 	setDPIAwareness()
@@ -91,7 +92,7 @@ func main() {
 func onReady() {
 	systray.SetIcon(trayIcon())
 	systray.SetTitle("MeshMux")
-	systray.SetTooltip("MeshMux " + trayVersion)
+	systray.SetTooltip("MeshMux " + version)
 	if startupErr != nil {
 		systray.SetTooltip("启动: " + startupErr.Error())
 	}
@@ -99,7 +100,7 @@ func onReady() {
 	mOpenConfig := systray.AddMenuItem("打开配置页面", "在浏览器打开 MeshMux 配置")
 	mOpenDashboard := systray.AddMenuItem("打开 MetaCubeXD", "打开 mihomo 面板")
 	systray.AddSeparator()
-	mAbout := systray.AddMenuItem("版本 "+trayVersion, "MeshMux 版本")
+	mAbout := systray.AddMenuItem("版本 "+version, "MeshMux 版本")
 	mAbout.Disable()
 	mCore = systray.AddMenuItemCheckbox("核心运行：关", "启动或停止 mihomo", false)
 	mRestart := systray.AddMenuItem("重启核心", "重新启动 mihomo")

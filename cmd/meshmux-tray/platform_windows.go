@@ -113,7 +113,7 @@ func (b *windowsBackend) OpenConfig() error {
 		if err != nil {
 			return err
 		}
-		server.Version = trayVersion
+		server.Version = version
 		b.server = server
 	}
 	return runner.OpenURL(b.server.URL)
