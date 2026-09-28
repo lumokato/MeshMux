@@ -150,6 +150,24 @@ func TestDarwinProfileBindsDNSOnlyToLoopback(t *testing.T) {
 	}
 }
 
+func TestWindowsProfileBindsDNSOnlyToLoopback(t *testing.T) {
+	enabledDNS := true
+	cfg := &config.Config{
+		Ports: config.Ports{Mixed: 2080, Controller: "127.0.0.1:9090"},
+		DNS:   config.DNS{Enabled: &enabledDNS},
+	}
+	text, err := Render(cfg, config.Target{Name: "windows", Type: "windows-mihomo", Output: "profiles/windows.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "  listen: 127.0.0.1:1053\n") {
+		t.Fatalf("windows profile DNS is not loopback-only:\n%s", text)
+	}
+	if strings.Contains(text, "  listen: 0.0.0.0:1053\n") {
+		t.Fatalf("windows profile exposes DNS on all interfaces:\n%s", text)
+	}
+}
+
 func TestDesktopTUNProfileHijacksDNSAndSuppressesAAAA(t *testing.T) {
 	enabledDNS := true
 	cfg := &config.Config{

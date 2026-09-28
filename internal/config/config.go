@@ -472,6 +472,7 @@ func (c *Config) applyDefaults(goos string) {
 	}
 	c.deriveSetup()
 	c.deriveSubStoreDNS()
+	c.migrateLegacyDNSFallbacks()
 	c.applySetup(goos)
 }
 
@@ -718,6 +719,17 @@ func (c *Config) deriveSubStoreDNS() {
 	if values, ok := c.DNS.NameserverPolicy["+.i.example.com"]; ok {
 		delete(c.DNS.NameserverPolicy, "+.i.example.com")
 		c.DNS.NameserverPolicy["+.i."+root] = values
+	}
+}
+
+// migrateLegacyDNSFallbacks upgrades configs written before the fallback DoH
+// was routed through the proxy group: the bare dns.google default dials
+// directly, which is unreachable from the domestic network and stalls every
+// fallback resolution. Only the exact legacy default is rewritten; any
+// deliberate customization is preserved.
+func (c *Config) migrateLegacyDNSFallbacks() {
+	if len(c.DNS.Fallbacks) == 1 && c.DNS.Fallbacks[0] == "https://dns.google/dns-query" {
+		c.DNS.Fallbacks = []string{"https://dns.google/dns-query#PROXY"}
 	}
 }
 

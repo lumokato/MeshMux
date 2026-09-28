@@ -223,6 +223,28 @@ func TestStorageCopyOmitsDerivedRuntimeFields(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultsMigratesLegacyDNSFallback(t *testing.T) {
+	cfg := Config{DNS: DNS{Fallbacks: []string{"https://dns.google/dns-query"}}}
+	cfg.ApplyDefaults()
+	if len(cfg.DNS.Fallbacks) != 1 || cfg.DNS.Fallbacks[0] != "https://dns.google/dns-query#PROXY" {
+		t.Fatalf("legacy fallback default was not migrated: %#v", cfg.DNS.Fallbacks)
+	}
+}
+
+func TestApplyDefaultsPreservesCustomDNSFallbacks(t *testing.T) {
+	custom := []string{"https://dns.google/dns-query", "https://cloudflare-dns.com/dns-query"}
+	cfg := Config{DNS: DNS{Fallbacks: append([]string{}, custom...)}}
+	cfg.ApplyDefaults()
+	if len(cfg.DNS.Fallbacks) != len(custom) {
+		t.Fatalf("custom fallbacks were rewritten: %#v", cfg.DNS.Fallbacks)
+	}
+	for i, want := range custom {
+		if cfg.DNS.Fallbacks[i] != want {
+			t.Fatalf("custom fallbacks were rewritten: %#v", cfg.DNS.Fallbacks)
+		}
+	}
+}
+
 func TestApplyDefaultsMigratesLegacyMihomoComponent(t *testing.T) {
 	for _, component := range []Component{
 		{Repo: "MetaCubeX/mihomo", AssetPattern: `mihomo-windows-amd64-compatible.*\.zip$`},

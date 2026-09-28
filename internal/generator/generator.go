@@ -401,13 +401,12 @@ func renderDNS(b *strings.Builder, cfg *config.Config, target config.Target) {
 	linef(b, "dns:")
 	linef(b, "  enable: true")
 	if !isMobileTarget(target) {
-		// Linux and macOS resolve through their own local setup, so the DNS
-		// listener stays on the loopback interface rather than every adapter.
-		listenAddress := "0.0.0.0:1053"
-		if target.Type == "linux-mihomo" || target.Type == "darwin-mihomo" {
-			listenAddress = "127.0.0.1:1053"
-		}
-		linef(b, "  listen: %s", listenAddress)
+		// The DNS listener only serves local clients: TUN-hijacked queries
+		// are answered in-band and never touch this socket. Binding every
+		// adapter exposed the resolver to the LAN (the Windows firewall
+		// carries inbound allow rules for the core), so all desktop targets
+		// stay on loopback.
+		linef(b, "  listen: 127.0.0.1:1053")
 	}
 	// When the profile hijacks client DNS through the TUN resolver, AAAA
 	// answers are suppressed: proxied IPv6 destinations fail at the remote
