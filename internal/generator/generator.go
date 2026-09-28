@@ -266,9 +266,9 @@ func Render(cfg *config.Config, target config.Target) (string, error) {
 
 	renderTUN(&b, cfg, target)
 	renderDNS(&b, cfg, target)
-	renderProxies(&b, cfg, wgConfigs, providerProxyLines)
+	renderProxies(&b, cfg, target, wgConfigs, providerProxyLines)
 	renderGroups(&b, providerProxyNames, wgNames, cfg.Setup.AllowDirectOnly)
-	renderRules(&b, cfg, wgConfigs)
+	renderRules(&b, cfg, target, wgConfigs)
 
 	return strings.TrimRight(b.String(), "\n") + "\n", nil
 }
@@ -437,9 +437,10 @@ func renderDNS(b *strings.Builder, cfg *config.Config, target config.Target) {
 	linef(b, "")
 }
 
-func renderProxies(b *strings.Builder, cfg *config.Config, wgConfigs []wgConfig, providerProxyLines []string) {
+func renderProxies(b *strings.Builder, cfg *config.Config, target config.Target, wgConfigs []wgConfig, providerProxyLines []string) {
 	linef(b, "proxies:")
-	if len(providerProxyLines) == 0 && len(wgConfigs) == 0 {
+	tailnet := cfg.Tailscale.Enabled && !isMobileTarget(target)
+	if len(providerProxyLines) == 0 && len(wgConfigs) == 0 && !tailnet {
 		linef(b, "  []")
 		linef(b, "")
 		return
@@ -450,7 +451,36 @@ func renderProxies(b *strings.Builder, cfg *config.Config, wgConfigs []wgConfig,
 	for _, wg := range wgConfigs {
 		renderWGProxy(b, cfg, wg)
 	}
+	if tailnet {
+		renderTailnetProxy(b, target)
+	}
 	linef(b, "")
+}
+
+// renderTailnetProxy emits the direct outbound carrying tailnet destinations.
+// Upstream mihomo has no tsnet, so this outbound only differs from DIRECT by
+// binding to the tailscaled adapter: without the binding,
+// auto-detect-interface pins the dial to the default interface and tailnet
+// addresses time out. darwin assigns utun names dynamically, so there the
+// dial stays unbound and follows the system route table instead.
+func renderTailnetProxy(b *strings.Builder, target config.Target) {
+	linef(b, "  - name: %s", quote("tailnet"))
+	linef(b, "    type: direct")
+	if iface := tailnetInterface(target); iface != "" {
+		linef(b, "    interface-name: %s", quote(iface))
+	}
+	linef(b, "    udp: true")
+}
+
+func tailnetInterface(target config.Target) string {
+	switch target.Type {
+	case "windows-mihomo":
+		return "Tailscale"
+	case "linux-mihomo":
+		return "tailscale0"
+	default:
+		return ""
+	}
 }
 
 func renderWGProxy(b *strings.Builder, cfg *config.Config, wg wgConfig) {
@@ -516,7 +546,7 @@ func renderGroups(b *strings.Builder, providers, wgNames []string, directOnly bo
 	linef(b, "")
 }
 
-func renderRules(b *strings.Builder, cfg *config.Config, wgConfigs []wgConfig) {
+func renderRules(b *strings.Builder, cfg *config.Config, target config.Target, wgConfigs []wgConfig) {
 	linef(b, "rules:")
 	for _, host := range providerHosts(cfg.Providers) {
 		linef(b, "  - DOMAIN,%s,DIRECT", host)
@@ -535,6 +565,17 @@ func renderRules(b *strings.Builder, cfg *config.Config, wgConfigs []wgConfig) {
 	}
 	for _, domain := range cfg.Rules.ProxyDomains {
 		domainRule(b, domain, "PROXY")
+	}
+	// Tailnet services publish their 100.64/10 (or ULA) addresses through
+	// public DNS, so a connection that missed every domain rule can still be
+	// a tailnet destination. Steer those to the bound tailnet outbound: plain
+	// DIRECT would be pinned to the default interface and time out. No
+	// no-resolve: mixed-port requests arrive as bare domains and only match
+	// after resolution, the same lookup GEOIP,CN already forces on every
+	// otherwise-unmatched connection.
+	if cfg.Tailscale.Enabled && !isMobileTarget(target) {
+		linef(b, "  - IP-CIDR,100.64.0.0/10,tailnet")
+		linef(b, "  - IP-CIDR6,fd7a:115c:a1e0::/48,tailnet")
 	}
 	linef(b, "  - GEOIP,CN,DIRECT")
 	linef(b, "  - MATCH,PROXY")

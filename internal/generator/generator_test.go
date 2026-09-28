@@ -238,6 +238,61 @@ func TestDesktopTUNProfileExcludesTailnetRoutes(t *testing.T) {
 	}
 }
 
+func TestDesktopProfileRoutesTailnetThroughBoundOutbound(t *testing.T) {
+	enabledDNS := true
+	cfg := &config.Config{
+		Ports: config.Ports{Mixed: 2080, Controller: "127.0.0.1:9090"},
+		DNS:   config.DNS{Enabled: &enabledDNS},
+		TUN:   config.TUN{Enabled: true, AutoRoute: true},
+	}
+	cfg.Tailscale.Enabled = true
+
+	text, err := Render(cfg, config.Target{Name: "windows", Type: "windows-mihomo", Output: "profiles/windows.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"  - name: 'tailnet'\n",
+		"    type: direct\n",
+		"    interface-name: 'Tailscale'\n",
+		"    udp: true\n",
+		"  - IP-CIDR,100.64.0.0/10,tailnet\n",
+		"  - IP-CIDR6,fd7a:115c:a1e0::/48,tailnet\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("windows profile must carry the bound tailnet outbound and rules, missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Index(text, "IP-CIDR,100.64.0.0/10,tailnet") > strings.Index(text, "GEOIP,CN,DIRECT") {
+		t.Fatalf("tailnet rules must evaluate before GEOIP:\n%s", text)
+	}
+
+	text, err = Render(cfg, config.Target{Name: "linux", Type: "linux-mihomo", Output: "profiles/linux.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "    interface-name: 'tailscale0'\n") {
+		t.Fatalf("linux profile must bind the tailnet outbound to tailscale0:\n%s", text)
+	}
+
+	text, err = Render(cfg, config.Target{Name: "mobile", Type: "mobile-mihomo", Output: "profiles/mobile.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(text, "tailnet") {
+		t.Fatalf("mobile profiles have no tailscaled and must not reference tailnet:\n%s", text)
+	}
+
+	cfg.Tailscale.Enabled = false
+	text, err = Render(cfg, config.Target{Name: "windows", Type: "windows-mihomo", Output: "profiles/windows.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(text, "tailnet") {
+		t.Fatalf("tailnet outbound and rules must stay away while tailscale is disabled:\n%s", text)
+	}
+}
+
 func TestDesktopProfileRoutesFallbackDohThroughProxy(t *testing.T) {
 	enabledDNS := true
 	cfg := &config.Config{
