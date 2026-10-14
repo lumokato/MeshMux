@@ -372,7 +372,12 @@ jobs:
       - name: Set up Go for MeshMux
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22.x"
+          # Go 1.22's linker emits no LC_UUID load command; the dyld of macOS
+          # 15.4+/26 aborts such binaries ("dyld: missing LC_UUID load
+          # command"). A current toolchain emits it. The tailscale rebuild in
+          # tailscale-components is unaffected: tailscale's own go.mod forces
+          # GOTOOLCHAIN to a newer Go there.
+          go-version: "1.26.x"
 
       - name: Resolve version
         shell: bash

@@ -45,6 +45,13 @@ start, so the bundle can live anywhere.
   with `file` instead of executing it, so it never depends on Rosetta 2 being
   installed. Dashboard provisioning uses a throwaway arm64 build of the CLI
   for the same reason.
+- The macOS job builds MeshMux with a current Go (1.26.x), not the 1.22 the
+  other jobs pin: Go 1.22's linker emits no LC_UUID load command, and the
+  dyld of macOS 15.4+/26 aborts binaries without it ("dyld: missing LC_UUID
+  load command" — first seen failing `go test` on a macOS 26 runner). The
+  tailscale rebuild is unaffected because tailscale's own go.mod forces a
+  newer toolchain via GOTOOLCHAIN; a Go 1.26 darwin build was verified to
+  carry LC_UUID before pinning this.
 
 If GitHub reintroduces an Intel image (or the target moves to arm64), prefer a
 native runner over cross-compiling and update this note together with the
