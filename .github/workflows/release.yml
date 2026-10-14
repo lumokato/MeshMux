@@ -435,20 +435,20 @@ jobs:
             exit 1
           fi
           core_binary="mihomo-darwin-amd64-compatible-${MIHOMO_UPSTREAM_VERSION}.gz"
-          curl --fail --location --retry 3 \
+          curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
             --output "$components/$core_binary" \
             "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_UPSTREAM_VERSION}/$core_binary"
           echo "${MIHOMO_UPSTREAM_DARWIN_SHA256}  $components/$core_binary" | shasum -a 256 --check --strict
           gzip -dc "$components/$core_binary" > "$bundle/bin/mihomo"
           chmod 755 "$bundle/bin/mihomo"
 
-          curl --fail --location --retry 3 \
+          curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
             --output "$bundle/bin/geoip.metadb" \
             "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb"
 
           # geoip.metadb is a rolling asset: verify against the digest the
           # upstream release itself publishes instead of a pinned value.
-          expected_geoip="$(curl --fail --location --retry 3 -s \
+          expected_geoip="$(curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors -s \
             "https://api.github.com/repos/MetaCubeX/meta-rules-dat/releases/latest" \
             | jq -r '.assets[] | select(.name=="geoip.metadb") | .digest' | sed 's/^sha256://')"
           if [[ -z "$expected_geoip" ]]; then
