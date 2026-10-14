@@ -206,6 +206,28 @@ func isMihomoExecutableName(name string) bool {
 	return true
 }
 
+// resolveExisting resolves the deepest existing ancestor of path through
+// symlinks and reattaches the missing tail. macOS hands out /var/... paths
+// that the kernel reports as /private/var/... after a chdir; comparing one
+// form against the other would defeat the containment check in
+// installDashboard.
+func resolveExisting(path string) string {
+	tail := ""
+	current := path
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			return filepath.Join(resolved, tail)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return path
+		}
+		tail = filepath.Join(filepath.Base(current), tail)
+		current = parent
+	}
+}
+
 func installDashboard(archivePath, targetPath string) (string, error) {
 	target, err := filepath.Abs(targetPath)
 	if err != nil {
@@ -215,7 +237,7 @@ func installDashboard(archivePath, targetPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	relative, err := filepath.Rel(target, workingDir)
+	relative, err := filepath.Rel(resolveExisting(target), resolveExisting(workingDir))
 	if err == nil && (relative == "." || filepath.IsLocal(relative)) {
 		return "", fmt.Errorf("dashboard target must not contain the working directory")
 	}
