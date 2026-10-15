@@ -302,7 +302,8 @@ func TestTailscaleUpActionGuards(t *testing.T) {
 	}
 }
 
-func TestLinuxActionAPIRejectsRuntimeAndDesktopActions(t *testing.T) {	s := &Server{ConfigPath: filepath.Join(t.TempDir(), "missing.json")}
+func TestLinuxActionAPIRejectsRuntimeAndDesktopActions(t *testing.T) {
+	s := &Server{ConfigPath: filepath.Join(t.TempDir(), "missing.json")}
 	for _, action := range []string{"start", "stop", "proxy-on", "proxy-off", "dashboard"} {
 		t.Run(action, func(t *testing.T) {
 			body, err := json.Marshal(map[string]string{"action": action})
@@ -356,6 +357,9 @@ func TestPlatformUIForCurrentRuntime(t *testing.T) {
 	want := "windows"
 	if runtime.GOOS == "linux" {
 		want = "linux"
+	}
+	if runtime.GOOS == "darwin" {
+		want = "darwin"
 	}
 	if got := platformUIFor(runtime.GOOS).RuntimeTarget; got != want {
 		t.Fatalf("runtime target = %q, want %q", got, want)

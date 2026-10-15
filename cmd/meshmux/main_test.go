@@ -18,6 +18,12 @@ import (
 func TestStopLoadsConfigAndEntersRuntimeDirectory(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("MESHMUX_HOME", home)
+	// macOS temp dirs live under /var, a symlink to /private/var; the kernel
+	// resolves it after chdir, so compare the resolved form or the check
+	// reports /private/var/... against /var/....
+	if resolved, err := filepath.EvalSymlinks(home); err == nil {
+		home = resolved
+	}
 	cfg := config.Config{}
 	cfg.Ports.Controller = "127.0.0.1:" + freePort(t)
 	cfg.Ports.Mixed = freePortNumber(t)
@@ -332,6 +338,9 @@ func TestDefaultRuntimeTargetMatchesPlatform(t *testing.T) {
 	want := "windows"
 	if runtime.GOOS == "linux" {
 		want = "linux"
+	}
+	if runtime.GOOS == "darwin" {
+		want = "darwin"
 	}
 	if got := defaultRuntimeTarget(); got != want {
 		t.Fatalf("defaultRuntimeTarget = %q, want %q", got, want)

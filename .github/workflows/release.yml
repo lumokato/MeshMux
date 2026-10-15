@@ -30,6 +30,7 @@ env:
   MIHOMO_UPSTREAM_VERSION: v1.19.31
   MIHOMO_UPSTREAM_WINDOWS_SHA256: 93D14E9A13B49B2F2D256202D02CC8D14A7C4695EDF084CAE0F941986BC9C218
   MIHOMO_UPSTREAM_LINUX_SHA256: 04CF9F09671704F839DDBEE2E93069DC831A4123A75281E725D1D96AB9AC1AFC
+  MIHOMO_UPSTREAM_DARWIN_SHA256: FB6FCA0E105B4310A21EAACD3A8D3853D3D8B87FA4C69737BEA52A30A435AAC7
   # Upstream tailscale rebuild: built from the official tag with no source
   # changes (see THIRD_PARTY_NOTICES.md). Upstream does not publish raw
   # tailscaled binaries for Windows and macOS, so MeshMux builds its own from
@@ -361,11 +362,142 @@ jobs:
             release/*.exe.sha256
           if-no-files-found: error
 
+  macos:
+    runs-on: macos-latest
+    needs: [tailscale-components]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go for MeshMux
+        uses: actions/setup-go@v5
+        with:
+          # Go 1.22's linker emits no LC_UUID load command; the dyld of macOS
+          # 15.4+/26 aborts such binaries ("dyld: missing LC_UUID load
+          # command"). A current toolchain emits it. The tailscale rebuild in
+          # tailscale-components is unaffected: tailscale's own go.mod forces
+          # GOTOOLCHAIN to a newer Go there.
+          go-version: "1.26.x"
+
+      - name: Resolve version
+        shell: bash
+        run: |
+          version="$INPUT_VERSION"
+          if [[ -z "$version" && "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          if [[ -z "$version" ]]; then
+            version="$DEVELOPMENT_VERSION"
+          fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid release version" >&2; exit 1; }
+          echo "MESHMUX_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Test MeshMux
+        run: |
+          go test ./...
+          go vet ./...
+
+      - name: Download tailscale components
+        uses: actions/download-artifact@v4
+        with:
+          name: Tailscale-component-archives
+          path: ${{ runner.temp }}/ts-archives
+
+      - name: Build macOS application bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/meshmux-macos"
+          components="$RUNNER_TEMP/meshmux-components"
+          archive="MeshMux-macos-amd64-v${MESHMUX_VERSION}.tar.gz"
+          mkdir -p "$bundle/bin" "$components"
+
+          # The tray links Cocoa through cgo, so it needs a macOS toolchain.
+          # macos-13 (the last Intel image) is retired, so the arm64 runner
+          # cross-compiles x86_64 with the universal SDK; see
+          # packaging/macos/BUILD-NOTES.md. The CLI stays pure Go, and a
+          # throwaway arm64 CLI provisions the dashboard so the job never
+          # depends on Rosetta 2 to run an x86_64 binary.
+          CGO_ENABLED=1 GOARCH=amd64 CC="clang -arch x86_64" \
+            go build -trimpath -ldflags "-s -w -X main.version=$MESHMUX_VERSION" \
+            -o "$bundle/meshmux-tray" ./cmd/meshmux-tray
+          CGO_ENABLED=0 GOARCH=amd64 \
+            go build -trimpath -ldflags "-s -w -X main.version=$MESHMUX_VERSION" \
+            -o "$bundle/meshmux" ./cmd/meshmux
+          CGO_ENABLED=0 GOARCH=arm64 \
+            go build -trimpath -ldflags "-s -w -X main.version=$MESHMUX_VERSION" \
+            -o "$components/meshmux-cli-arm64" ./cmd/meshmux
+
+          if [[ -z "$MIHOMO_UPSTREAM_DARWIN_SHA256" ]]; then
+            echo "MIHOMO_UPSTREAM_DARWIN_SHA256 is empty; download" >&2
+            echo "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_UPSTREAM_VERSION}/mihomo-darwin-amd64-compatible-${MIHOMO_UPSTREAM_VERSION}.gz" >&2
+            echo "hash it and record the value in the workflow env before publishing." >&2
+            exit 1
+          fi
+          core_binary="mihomo-darwin-amd64-compatible-${MIHOMO_UPSTREAM_VERSION}.gz"
+          curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
+            --output "$components/$core_binary" \
+            "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_UPSTREAM_VERSION}/$core_binary"
+          echo "${MIHOMO_UPSTREAM_DARWIN_SHA256}  $components/$core_binary" | shasum -a 256 --check --strict
+          gzip -dc "$components/$core_binary" > "$bundle/bin/mihomo"
+          chmod 755 "$bundle/bin/mihomo"
+
+          curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
+            --output "$bundle/bin/geoip.metadb" \
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb"
+
+          # geoip.metadb is a rolling asset: verify against the digest the
+          # upstream release itself publishes instead of a pinned value.
+          expected_geoip="$(curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors -s \
+            "https://api.github.com/repos/MetaCubeX/meta-rules-dat/releases/latest" \
+            | jq -r '.assets[] | select(.name=="geoip.metadb") | .digest' | sed 's/^sha256://')"
+          if [[ -z "$expected_geoip" ]]; then
+            echo "upstream did not publish a digest for geoip.metadb" >&2
+            exit 1
+          fi
+          actual_geoip="$(shasum -a 256 "$bundle/bin/geoip.metadb" | cut -d' ' -f1)"
+          if [[ "$actual_geoip" != "$expected_geoip" ]]; then
+            echo "GeoIP digest mismatch: downloaded $actual_geoip, upstream published $expected_geoip" >&2
+            exit 1
+          fi
+
+          unzip -o "$RUNNER_TEMP/ts-archives"/tailscale-darwin-amd64-*.zip -d "$bundle/bin"
+
+          jq --arg version "$DASHBOARD_VERSION" --arg sha "$DASHBOARD_SHA256" \
+            '.components.dashboard = {repo:"MetaCubeX/metacubexd",releaseTag:$version,assetPattern:"compressed-dist\\.tgz$",path:"dashboard",sha256:$sha}' \
+            templates/meshmux.example.json > "$components/meshmux.local.json"
+          "$components/meshmux-cli-arm64" download dashboard -config "$components/meshmux.local.json"
+          cp -a "$components/dashboard" "$bundle/dashboard"
+          cp templates/meshmux.example.json "$bundle/meshmux.example.json"
+          cp packaging/macos/README.release.md "$bundle/README-macOS.md"
+          cp README.md README.en.md LICENSE SECURITY.md THIRD_PARTY_NOTICES.md "$bundle/"
+
+          # Every shipped binary must be x86_64; check instead of executing so
+          # the job does not depend on Rosetta 2.
+          for binary in meshmux meshmux-tray bin/mihomo bin/tailscaled bin/tailscale; do
+            file "$bundle/$binary" | grep -q "Mach-O 64-bit executable x86_64" || {
+              echo "unexpected architecture for $binary:" >&2
+              file "$bundle/$binary" >&2
+              exit 1
+            }
+          done
+
+          tar -C "$RUNNER_TEMP" -czf "$archive" meshmux-macos
+          shasum -a 256 "$archive" > "${archive}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MeshMux-macos-amd64
+          path: |
+            MeshMux-macos-amd64-v*.tar.gz
+            MeshMux-macos-amd64-v*.tar.gz.sha256
+          if-no-files-found: error
+
   release:
     permissions:
       contents: write
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [tailscale-components, linux, windows]
+    needs: [tailscale-components, linux, windows, macos]
     runs-on: ubuntu-latest
 
     steps:
@@ -390,11 +522,12 @@ jobs:
         run: |
           set -euo pipefail
           cd release-assets
-          # Exactly one installer and one Linux bundle. The release also carries
-          # the packaged tailscale components, so match the app assets by name
-          # instead of counting every .exe/.tar.gz in the directory.
+          # Exactly one installer and one bundle per platform. The release also
+          # carries the packaged tailscale components, so match the app assets
+          # by name instead of counting every .exe/.tar.gz in the directory.
           test "$(find . -maxdepth 1 -type f -name 'MeshMux-Setup-*.exe' | wc -l)" -eq 1
           test "$(find . -maxdepth 1 -type f -name 'MeshMux-linux-amd64-*.tar.gz' | wc -l)" -eq 1
+          test "$(find . -maxdepth 1 -type f -name 'MeshMux-macos-amd64-*.tar.gz' | wc -l)" -eq 1
           for pattern in 'tailscale-windows-amd64-*.zip' 'tailscale-linux-amd64-*.tar.gz' 'tailscale-darwin-amd64-*.zip'; do
             test "$(find . -maxdepth 1 -type f -name "$pattern" | wc -l)" -eq 1
           done
