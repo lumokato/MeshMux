@@ -663,6 +663,23 @@ func (s *Server) actionAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 		http.Error(w, fmt.Sprintf("Linux Web 管理页不允许执行 %s；请通过 systemd 或桌面会话管理", req.Action), http.StatusForbidden)
 		return
 	}
+	// Service repair must remain available with a damaged user config.
+	if strings.HasPrefix(req.Action, "mac-tailnet-") {
+		if goos != "darwin" {
+			http.Error(w, "macOS only", http.StatusBadRequest)
+			return
+		}
+		out, err := runner.MacTailscaleService(r.Context(), strings.TrimPrefix(req.Action, "mac-tailnet-"))
+		if err != nil {
+			http.Error(w, runner.RedactLogText(err.Error()), http.StatusBadRequest)
+			return
+		}
+		if out == "" {
+			out = "Tailnet 服务操作完成；退出 UI 不停止独立网络服务"
+		}
+		writeJSON(w, map[string]string{"message": out})
+		return
+	}
 	cfg, resolved, err := config.Load(s.ConfigPath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -753,20 +770,6 @@ func (s *Server) actionAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 			return
 		}
 		message = "已打开 MetaCubeXD"
-	case "mac-tailnet-install", "mac-tailnet-start", "mac-tailnet-stop", "mac-tailnet-restart", "mac-tailnet-down":
-		if goos != "darwin" {
-			http.Error(w, "macOS only", http.StatusBadRequest)
-			return
-		}
-		out, err := runner.MacTailscaleService(r.Context(), strings.TrimPrefix(req.Action, "mac-tailnet-"))
-		if err != nil {
-			http.Error(w, runner.RedactLogText(err.Error()), http.StatusBadRequest)
-			return
-		}
-		message = out
-		if message == "" {
-			message = "Tailnet 服务操作完成；退出 UI 不停止独立网络服务"
-		}
 	case "tailscale-up":
 		if goos == "darwin" {
 			out, err := runner.MacTailscaleService(r.Context(), "login")

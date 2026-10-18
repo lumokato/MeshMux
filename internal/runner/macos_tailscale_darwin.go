@@ -133,7 +133,7 @@ func macTailscaleControlScript(action string) (string, error) {
 		// The bounded command can time out while waiting for the browser. Return
 		// its login URL only to the authenticated local UI, not diagnostic logs.
 		// Never pass an AuthKey or force reauthentication/DNS/routes.
-		return prefix + "set +e\noutput=$(" + shellQuote(macTailscaleCLI()) + " --socket " + shellQuote(macTailscaleSocket) + " up --timeout=20s 2>&1)\ncode=$?\nprintf 'Tailnet login command exit %s (follow the URL if shown):\\n%s\\n' \"$code\" \"$output\"", nil
+		return prefix + "set +e\noutput=$(" + shellQuote(macTailscaleCLI()) + " --socket " + shellQuote(macTailscaleSocket) + " up --timeout=20s 2>&1)\ncode=$?\ncase \"$output\" in *https://login.tailscale.com/*) printf '%s\\n' \"$output\"; exit 0;; esac\nprintf '%s\\n' \"$output\"\nexit \"$code\"", nil
 	case "down":
 		return prefix + shellQuote(macTailscaleCLI()) + " --socket " + shellQuote(macTailscaleSocket) + " down", nil
 	}
@@ -260,14 +260,21 @@ rollback() {
  code=$?
  /bin/rmdir "$root/install.lock" || true
  if test "$code" != 0; then
+  /bin/launchctl disable system/com.meshmux.tailscaled || true
   /bin/launchctl bootout system/com.meshmux.tailscaled >/dev/null 2>&1 || true
   for name in tailscale tailscaled; do if test -f "$backup/$name"; then /bin/cp -p "$backup/$name" "$root/bin/$name"; fi; done
-  if test -f "$backup/service.plist"; then /bin/cp -p "$backup/service.plist" "$plist"; if test "$was_running" = 1; then /bin/sleep 1; /bin/launchctl bootstrap system "$plist" || true; fi; fi
+  if test -f "$backup/service.plist"; then
+   /bin/cp -p "$backup/service.plist" "$plist"
+   if test "$was_disabled" = 0; then /bin/launchctl enable system/com.meshmux.tailscaled || true; fi
+   if test "$was_running" = 1; then /bin/sleep 1; /bin/launchctl bootstrap system "$plist" || true; fi
+  fi
  fi
 }
 trap rollback EXIT
 if test -e "$root/state/tailscaled.state"; then
  test ! -L "$root/state/tailscaled.state" || exit 74
+ /usr/sbin/chown root:wheel "$root/state/tailscaled.state"
+ /bin/chmod 600 "$root/state/tailscaled.state"
  /bin/cp -p "$root/state/tailscaled.state" "$backup/tailscaled.state"
 fi`,
 		"legacy="+shellQuote(legacy),
@@ -277,7 +284,7 @@ if test ! -e "$root/state/tailscaled.state" && test -e "$legacy"; then
  test -f "$legacy" && test ! -L "$legacy" || exit 79
  test "$(/usr/bin/stat -f '%u' "$legacy")" = 0 || exit 79
  test "$(/usr/bin/stat -f '%z' "$legacy")" -gt 0 || exit 79
- /bin/cat "$legacy" > "$root/state/tailscaled.state"
+ /usr/bin/perl -MFcntl=:DEFAULT -MJSON::PP -e 'use strict; my ($src,$dst)=@ARGV; sysopen(my $in,$src,O_RDONLY|O_NOFOLLOW) or die "open legacy identity"; my @st=stat($in); die "unsafe legacy identity" unless -f $in && $st[4]==0 && ($st[2]&077)==0 && $st[7]>0 && $st[7]<10485760; local $/; my $data=<$in>; my $state=decode_json($data); die "not a tailscaled identity" unless ref($state) eq "HASH" && exists $state->{"_machinekey"}; sysopen(my $out,$dst,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600) or die "create protected identity"; print {$out} $data or die "write identity"; close($out) or die "close identity";' "$legacy" "$root/state/tailscaled.state"
  /usr/sbin/chown root:wheel "$root/state/tailscaled.state"
  /bin/chmod 600 "$root/state/tailscaled.state"
  /bin/cp -p "$root/state/tailscaled.state" "$backup/tailscaled.state"
@@ -289,7 +296,7 @@ fi
 /bin/chmod 644 "$plist_stage"
 /bin/mv -f "$plist_stage" "$plist"
 /usr/bin/plutil -lint "$plist"
-if test "$was_disabled" = 0; then
+if test "$was_disabled" = 0 || test "$was_running" = 1; then
 /bin/launchctl enable system/com.meshmux.tailscaled
 # Allow launchd's prior job teardown to finish before loading its replacement.
 /bin/sleep 1
@@ -301,6 +308,7 @@ for attempt in 1 2 3 4 5; do
  /bin/sleep 1
 done
 test "$ready" = 1 || exit 80
+if test "$was_disabled" = 1; then /bin/launchctl disable system/com.meshmux.tailscaled; fi
 fi
 /bin/rmdir "$root/install.lock"
 trap - EXIT

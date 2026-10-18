@@ -90,7 +90,7 @@ func TestMacTailscaleRootInstallConstraints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"check_dir", "stage_tailscaled", "shasum -a 256", "trap rollback EXIT", "test -f \"$legacy\"", "test ! -L", "chmod 600", "chmod +a", "mktemp /Library/LaunchDaemons", "bootout system/com.meshmux.tailscaled"} {
+	for _, want := range []string{"check_dir", "stage_tailscaled", "shasum -a 256", "trap rollback EXIT", "test -f \"$legacy\"", "test ! -L", "chmod 600", "chmod +a", "mktemp /Library/LaunchDaemons", "bootout system/com.meshmux.tailscaled", "O_NOFOLLOW", "O_EXCL", "_machinekey", "launchctl disable system/com.meshmux.tailscaled"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("missing %q", want)
 		}
