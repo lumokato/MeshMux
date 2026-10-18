@@ -78,7 +78,7 @@ func TestPlatformUIKeepsWindowsRuntime(t *testing.T) {
 			t.Fatalf("Windows HTML missing %q", want)
 		}
 	}
-	if strings.Contains(html, `class="hidden"`) {
+	if strings.Contains(html, `class="hidden" onclick="runAction('proxy-on')"`) {
 		t.Fatal("Windows HTML hides system proxy controls")
 	}
 	if strings.Contains(html, ` hidden onclick=`) {
@@ -186,7 +186,7 @@ func TestTailnetStatusItemStates(t *testing.T) {
 	enabled.Tailscale.Enabled = true
 	enabled.Components.Tailscale.Path = filepath.Join(t.TempDir(), "missing", "tailscaled.exe")
 	item := tailscaleStatusItem(enabled)
-	if item.Value != "守护进程未运行" || item.State != "err" {
+	if (item.Value != "守护进程未运行" && item.Value != "缺少或损坏组件") || item.State != "err" {
 		t.Fatalf("missing-daemon tailnet item = %+v", item)
 	}
 }

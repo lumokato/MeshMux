@@ -7,26 +7,38 @@ archive as `README-macOS.md`.
 ## Bundle layout
 
 ```
-meshmux-macos/
-  meshmux               CLI + headless runner; pure Go (CGO_ENABLED=0)
-  meshmux-tray          menu bar tray; Cocoa via cgo (CGO_ENABLED=1)
-  bin/mihomo            upstream mihomo darwin-amd64-compatible release
-  bin/tailscaled        tailscale rebuild (tailscale-darwin-amd64-*.zip)
-  bin/tailscale
-  bin/geoip.metadb      verified against the upstream-published digest
-  dashboard/            MetaCubeXD, downloaded and checksum-verified via the CLI
-  meshmux.example.json  template configuration
-  README-macOS.md, README.md, README.en.md, LICENSE, SECURITY.md,
-  THIRD_PARTY_NOTICES.md
+MeshMux.app/
+  Contents/Info.plist          application identity, icon and LSUIElement
+  Contents/PkgInfo
+  Contents/MacOS/meshmux       CLI (CGO_ENABLED=0)
+  Contents/MacOS/meshmux-tray  menu bar tray; Cocoa via cgo (CGO_ENABLED=1)
+  Contents/Resources/
+    MeshMux.icns
+    bin/mihomo                upstream darwin-amd64-compatible release
+    bin/tailscaled            tailscale rebuild from component job
+    bin/tailscale
+    bin/geoip.metadb           upstream digest-verified
+    dashboard/                checksum-verified MetaCubeXD
+    meshmux.example.json
+    README-macOS.md, README.md, README.en.md, LICENSE, SECURITY.md,
+    THIRD_PARTY_NOTICES.md
 ```
 
 At runtime the tray changes its working directory to
 `~/Library/Application Support/MeshMux` (`config.LocalDataDir`, overridable
-with `MESHMUX_HOME`) and seeds `bin/`, `dashboard/`, and geoip from the bundle
-directory (`config.Bundled*Path` points next to the executable). This is the
-same model the Windows installer implements by copying into
-`%LOCALAPPDATA%\MeshMux`; on macOS the seeding happens on demand at first
-start, so the bundle can live anywhere.
+with `MESHMUX_HOME`). `config.BundleDir` selects Contents/Resources inside
+an app and retains executable-relative paths for old portable installations.
+Runtime files remain outside the app; changing the app does not replace user
+configuration or Tailnet identity. Explicit Tailnet service installation validates
+the signed component manifest and stages a root-owned copy in a protected Library
+root; normal UI startup never elevates. See README.release.md for service semantics.
+
+The workflow stages a portable payload and calls `build-app.py`, which ad-hoc signs
+the binaries, hashes the Tailscale pair, then signs/verifies the outer app before
+archiving it. Re-signing nested executables after hashing is forbidden. The builder refuses existing output,
+validates required components, and only copies an allowlist. Developer ID
+signing/notarization is not provided. Run `python3 packaging/macos/test_build_app.py`
+for packaging regressions. Login startup remains an explicit user choice.
 
 ## Why the tray is cross-compiled on an arm64 runner
 

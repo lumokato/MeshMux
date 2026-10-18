@@ -1,18 +1,18 @@
-# MeshMux 0.5.3
+# MeshMux 0.5.4
 
-修复 tailnet 服务域名经系统代理访问时被错误送进日常代理、最终超时不可达的问题。
+## macOS Intel
 
-## 背景
+- 标准 MeshMux.app，支持 Finder / LaunchServices 启动、菜单栏图标、可选登录启动和同一数据目录单实例保护。配置和运行数据留在 Application Support，不写入应用包。
+- 内置 tailscale/tailscaled，打包拒绝缺件、不可执行、非 Intel 架构和链接资源；签名后二进制 SHA-256 清单用于安装前与受保护副本复核。
+- 设置页显式授权安装 MeshMux 专有 Tailnet LaunchDaemon。可执行文件、身份与 IPC 目录移至受保护的 Library 根目录；识别并保留旧 MeshMux 身份，不覆盖其它 Tailscale 安装。
+- 显式启动/停止/重启、登录和断开入口。退出菜单栏停止用户 mihomo 核心并恢复其系统代理，但保持独立 Tailnet 网络服务；停止 Tailnet 服务同时禁用下次开机启动。
+- 区分缺组件、服务未安装/未运行、需要登录、NeedsMachineAuth 和连接状态。已有 IP 或 Running 状态不等于实际 peer 连通。
+- 安装更新保留受保护恢复点；安装失败停用新 job 并尝试恢复旧作业。普通启动不会静默提权、下载、重新登记或覆盖自启选择。
 
-0.4.0 把 tailnet 归属迁到官方 tailscaled 时，旧 tsnet 模型的 tailnet 路由（TS 出站、`tailscale.routes`/`tailscale.domains` 生成的规则）被一并移除，只留下 TUN 层的 `route-exclude-address`。这条豁免只对被 TUN 接管的流量有效；认系统代理（混合端口）的流量不经过 TUN 路由，规则链里没有任何条目认识 tailnet 网段——tailnet 服务域名（公网 DNS 直接解析到 100.64/10 地址）一路漏到 `MATCH,PROXY`，由远端代理节点去连够不着的 tailnet 地址，表现为超时。
+## 安全与兼容边界
 
-## 修复
+本版 macOS 应用使用 ad-hoc 签名，未做 Developer ID 签名或公证。它能验证包内完整性，但不是发布者身份信任锚；安装前应校验正式 Release 资产 SHA-256，并仅对可信来源应用授予管理员权限。不得全局关闭 Gatekeeper。
 
-- tailscale 启用时，桌面目标（Windows/Linux/macOS）自动生成 `tailnet` 直连出站并绑定 tailscaled 网卡（Windows `Tailscale`、Linux `tailscale0`；macOS 的 utun 名是动态分配的，保持不绑定、走系统路由表）。只配 DIRECT 规则不够：mihomo 的 auto-detect-interface 会把 DIRECT 拨号绑到默认网卡，tailnet 地址照样超时。
-- 规则链在 `GEOIP,CN` 之前生成 `IP-CIDR,100.64.0.0/10,tailnet` 与 `IP-CIDR6,fd7a:115c:a1e0::/48,tailnet`，不带 `no-resolve`：混合端口来的域名请求解析后即可命中，解析开销与现状相同（`GEOIP,CN` 本来就会解析这些漏网连接）。
-- 任何解析到 tailnet 网段的域名自动覆盖，无需逐个配置域名；手机目标不生成（没有 tailscaled）。
+Tailscale 组件是 MeshMux 从官方上游标签重构建的产物，不冒称官方签名的 macOS 安装器。mihomo TUN 的特权模式不由本版 Tailnet 服务代管。Windows/Linux 功能保持原有行为，由同版 CI 回归。
 
-## 验证
-
-- `go vet ./...`、`go test ./...` 通过；新增用例覆盖 Windows/Linux 绑定、规则顺序、mobile 豁免与开关关闭场景。
-- Windows 实机验收：经混合端口访问 tailnet 服务（dokploy.ops.lumokato.com → 100.90.26.22）从超时恢复为 200，连接表规则命中 `IPCIDR 100.64.0.0/10`、出站链 `tailnet`；TUN 路径行为不变。
+本机系统冷启动/注销未包含在不停机验收中；launchd 配置检查和可重复启停不替代真实重启测试。恢复目录和旧身份不会被自动删除。

@@ -248,6 +248,12 @@ func tailscaleStatusItem(cfg *config.Config) statusItem {
 	if !cfg.Tailscale.Enabled {
 		return statusItem{Value: "关闭", State: "muted"}
 	}
+	if runtime.GOOS == "darwin" && !runner.MacTailscaleInstalled() {
+		if err := runner.ValidateMacTailscaleBundle(config.BundleDir()); err != nil {
+			return statusItem{Value: "缺少或损坏组件", State: "err", Detail: err.Error()}
+		}
+		return statusItem{Value: "服务未安装", State: "warn", Detail: "点击「安装/修复 Tailnet 服务」，在系统对话框显式授权；不会自动覆盖身份"}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	status, err := runner.TailscaleStatus(ctx, cfg)
@@ -262,7 +268,9 @@ func tailscaleStatusItem(cfg *config.Config) statusItem {
 		}
 		return statusItem{Value: "已登录", State: "warn", Detail: detail}
 	case "NeedsLogin":
-		return statusItem{Value: "需要登录", State: "warn", Detail: "点击「登录 Tailnet」执行登记（需已配置 Auth Key），或运行 meshmux tailscale up"}
+		return statusItem{Value: "需要登录", State: "warn", Detail: "点击「登录 Tailnet」；macOS 显式授权后提供浏览器登录链接，不自动重新登记"}
+	case "NeedsMachineAuth":
+		return statusItem{Value: "NeedsMachineAuth", State: "warn", Detail: "等待 Tailnet 管理员审批；已有 IP 不代表可连接，不要反复登录"}
 	default:
 		return statusItem{Value: status.BackendState, State: "warn", Detail: strings.Join(status.Health, "; ")}
 	}
@@ -431,6 +439,7 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 func renderIndexHTML(goos string) string {
 	ui := platformUIFor(goos)
 	replacer := strings.NewReplacer(
+		"{{MAC_TAILNET_CLASS}}", boolClass(goos == "darwin"),
 		"{{RUNTIME_TITLE}}", ui.RuntimeTitle,
 		"{{RUNTIME_TARGET}}", ui.RuntimeTarget,
 		"{{RUNTIME_TARGET_TYPE}}", ui.RuntimeTargetType,
@@ -448,39 +457,39 @@ func platformUIFor(goos string) platformUI {
 	switch goos {
 	case "linux":
 		return platformUI{
-			RuntimeTitle:       "Linux 服务器运行",
-			RuntimeTarget:      "linux",
-			RuntimeTargetType:  "linux-mihomo",
-			RuntimeHostname:    "linux-meshmux",
-			RuntimeOutput:      "profiles/linux.yaml",
-			ProxyModeLabel:     "代理端口（固定）",
-			SubscriptionScope:  "Linux 服务器和手机共用",
-			SystemProxy:        false,
-			RuntimeActions:     false,
+			RuntimeTitle:      "Linux 服务器运行",
+			RuntimeTarget:     "linux",
+			RuntimeTargetType: "linux-mihomo",
+			RuntimeHostname:   "linux-meshmux",
+			RuntimeOutput:     "profiles/linux.yaml",
+			ProxyModeLabel:    "代理端口（固定）",
+			SubscriptionScope: "Linux 服务器和手机共用",
+			SystemProxy:       false,
+			RuntimeActions:    false,
 		}
 	case "darwin":
 		return platformUI{
-			RuntimeTitle:       "macOS 运行方式",
-			RuntimeTarget:      "darwin",
-			RuntimeTargetType:  "darwin-mihomo",
-			RuntimeHostname:    "mac-meshmux",
-			RuntimeOutput:      "profiles/darwin.yaml",
-			ProxyModeLabel:     "系统代理",
-			SubscriptionScope:  "macOS 和手机共用",
-			SystemProxy:        true,
-			RuntimeActions:     true,
+			RuntimeTitle:      "macOS 运行方式",
+			RuntimeTarget:     "darwin",
+			RuntimeTargetType: "darwin-mihomo",
+			RuntimeHostname:   "mac-meshmux",
+			RuntimeOutput:     "profiles/darwin.yaml",
+			ProxyModeLabel:    "系统代理",
+			SubscriptionScope: "macOS 和手机共用",
+			SystemProxy:       true,
+			RuntimeActions:    true,
 		}
 	default:
 		return platformUI{
-			RuntimeTitle:       "Windows 运行方式",
-			RuntimeTarget:      "windows",
-			RuntimeTargetType:  "windows-mihomo",
-			RuntimeHostname:    "windows-meshmux",
-			RuntimeOutput:      "profiles/windows.yaml",
-			ProxyModeLabel:     "系统代理",
-			SubscriptionScope:  "Windows 和手机共用",
-			SystemProxy:        true,
-			RuntimeActions:     true,
+			RuntimeTitle:      "Windows 运行方式",
+			RuntimeTarget:     "windows",
+			RuntimeTargetType: "windows-mihomo",
+			RuntimeHostname:   "windows-meshmux",
+			RuntimeOutput:     "profiles/windows.yaml",
+			ProxyModeLabel:    "系统代理",
+			SubscriptionScope: "Windows 和手机共用",
+			SystemProxy:       true,
+			RuntimeActions:    true,
 		}
 	}
 }
@@ -654,6 +663,23 @@ func (s *Server) actionAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 		http.Error(w, fmt.Sprintf("Linux Web 管理页不允许执行 %s；请通过 systemd 或桌面会话管理", req.Action), http.StatusForbidden)
 		return
 	}
+	// Service repair must remain available with a damaged user config.
+	if strings.HasPrefix(req.Action, "mac-tailnet-") {
+		if goos != "darwin" {
+			http.Error(w, "macOS only", http.StatusBadRequest)
+			return
+		}
+		out, err := runner.MacTailscaleService(r.Context(), strings.TrimPrefix(req.Action, "mac-tailnet-"))
+		if err != nil {
+			http.Error(w, runner.RedactLogText(err.Error()), http.StatusBadRequest)
+			return
+		}
+		if out == "" {
+			out = "Tailnet 服务操作完成；退出 UI 不停止独立网络服务"
+		}
+		writeJSON(w, map[string]string{"message": out})
+		return
+	}
 	cfg, resolved, err := config.Load(s.ConfigPath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -745,6 +771,15 @@ func (s *Server) actionAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 		}
 		message = "已打开 MetaCubeXD"
 	case "tailscale-up":
+		if goos == "darwin" {
+			out, err := runner.MacTailscaleService(r.Context(), "login")
+			if err != nil {
+				http.Error(w, runner.RedactLogText(err.Error()), http.StatusBadGateway)
+				return
+			}
+			message = out
+			break
+		}
 		if !cfg.Tailscale.Enabled {
 			http.Error(w, "Tailnet 未启用；先在配置里启用 Tailnet 出站", http.StatusBadRequest)
 			return

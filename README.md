@@ -51,6 +51,19 @@ C:\Program Files\MeshMux
 
 日志会自动按大小轮转。`mihomo.out.log` 和 `mihomo.err.log` 每个文件上限 8 MiB，最多保留 3 个备份；`meshmux.log` 上限 2 MiB，最多保留 2 个备份。写入日志时会隐藏 URL、密钥、令牌等敏感字段；正常启动不再重新扫描和脱敏整套历史日志。
 
+## macOS
+
+macOS Intel 发布归档包含标准 `MeshMux.app`。在 Finder 解压后拖入“应用程序”，
+双击或通过 Spotlight 启动；程序显示在菜单栏，不占用 Dock。
+用户配置和身份保留在 `~/Library/Application Support/MeshMux`，不写入应用包。
+登录自启动由用户在菜单中选择，不随安装强制开启。
+
+安装、Gatekeeper 提示、目录结构和权限限制见
+[macOS 安装说明](packaging/macos/README.release.md)。发布包当前为 ad-hoc 签名，
+未做 Developer ID 签名或公证。Tailnet 服务从设置页显式授权安装；独立的 root-owned
+LaunchDaemon 保管身份，退出菜单栏不会断开 Tailnet。设置页可授权启停/重启，停止同时禁用
+开机启动；普通启动不覆盖此选择或已有身份。mihomo TUN 仍需另行配置特权 runner。
+
 ## Linux
 
 Linux 可使用 `meshmux run linux` 运行常驻核心，使用 `meshmux serve` 提供仅监听 loopback 的配置页面。仓库中的 `packaging/linux` 包含 systemd 单元、XFCE 登录自启动项和受限 sudoers 部署示例；在其他账户或目录安装前需要按实际环境调整。核心服务与托盘相互独立：退出托盘不会停止代理，无图形会话时也不会额外启动托盘。

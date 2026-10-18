@@ -9,9 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
-	"sort"
 	"time"
 	"unicode/utf8"
 
@@ -43,6 +43,9 @@ func tailscaleAuthKeyPath() string {
 // the tailscale CLI. Windows uses a private named pipe; other platforms use a
 // socket inside the runtime state directory.
 func tailscaleSocketPath() string {
+	if socket := platformTailscaleSocket(); socket != "" {
+		return socket
+	}
 	if runtime.GOOS == "windows" {
 		return `\\.\pipe\MeshMux-Tailscale`
 	}
@@ -85,6 +88,9 @@ func PrepareTailscaleComponents(cfg *config.Config) error {
 	if !cfg.Tailscale.Enabled {
 		return nil
 	}
+	if runtime.GOOS == "darwin" {
+		return nil
+	} // explicit protected launchd installation only.
 	target := strings.TrimSpace(cfg.Components.Tailscale.Path)
 	if target == "" {
 		target = config.DefaultTailscaledPath()
@@ -353,6 +359,9 @@ func truncateLogLine(line string) string {
 var runTailscaleCLIForTest = runTailscaleCLI
 
 func tailscaleCLIPath(cfg *config.Config) string {
+	if cli := platformTailscaleCLI(); cli != "" && (strings.TrimSpace(cfg.Components.Tailscale.Path) == "" || isDefaultTailscaledExecPath(cfg.Components.Tailscale.Path)) {
+		return cli
+	}
 	dir := filepath.Dir(strings.TrimSpace(cfg.Components.Tailscale.Path))
 	if dir == "" || dir == "." {
 		dir = filepath.Dir(config.DefaultTailscaledPath())
@@ -583,6 +592,9 @@ func TailscaleStatus(ctx context.Context, cfg *config.Config) (TailscaleState, e
 // The windows service path supervises tailscaled separately and must not use
 // this wrapper, or two daemons would race for the same socket.
 func withTailscaleSupervision(ctx context.Context, cfg *config.Config, fn func() error) error {
+	if runtime.GOOS == "darwin" {
+		return fn()
+	} // launchd owns the privileged service, never a user supervisor.
 	if cfg == nil || !cfg.Tailscale.Enabled {
 		return fn()
 	}

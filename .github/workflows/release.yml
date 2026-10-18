@@ -482,7 +482,14 @@ jobs:
             }
           done
 
-          tar -C "$RUNNER_TEMP" -czf "$archive" meshmux-macos
+          python3 packaging/macos/test_build_app.py
+          python3 packaging/macos/build-app.py --payload "$bundle" \
+            --output "$RUNNER_TEMP/MeshMux.app" --version "$MESHMUX_VERSION"
+          # build-app.py signs nested executables before generating the digest
+          # manifest, then signs the outer app without mutating nested bytes.
+          codesign --verify --deep --strict "$RUNNER_TEMP/MeshMux.app"
+          # Keep the existing asset name; the archive now contains a real app.
+          tar -C "$RUNNER_TEMP" -czf "$archive" MeshMux.app
           shasum -a 256 "$archive" > "${archive}.sha256"
 
       - uses: actions/upload-artifact@v4
