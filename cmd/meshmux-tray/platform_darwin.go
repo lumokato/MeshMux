@@ -4,12 +4,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/meshmux/meshmux/internal/config"
+	"github.com/meshmux/meshmux/internal/fileutil"
 	"github.com/meshmux/meshmux/internal/generator"
 	"github.com/meshmux/meshmux/internal/runner"
 	"github.com/meshmux/meshmux/internal/webui"
@@ -23,14 +25,22 @@ import (
 type darwinBackend struct {
 	cfgPath string
 	server  *webui.Server
+	unlock  func()
 }
 
 func newPlatformBackend() (trayBackend, error) {
 	cfgPath, err := ensureWorkingDir()
-	return &darwinBackend{cfgPath: cfgPath}, err
+	if err != nil {
+		return &darwinBackend{cfgPath: cfgPath}, err
+	}
+	unlock, err := fileutil.TryLock(filepath.Join("state", "tray.lock"))
+	if err != nil {
+		return nil, err
+	}
+	return &darwinBackend{cfgPath: cfgPath, unlock: unlock}, nil
 }
 
-func platformStartupFatal(error) bool { return false }
+func platformStartupFatal(err error) bool { return errors.Is(err, fileutil.ErrBusy) }
 
 func recordTrayActionError(action string, err error) {
 	if err == nil {
@@ -163,6 +173,9 @@ func (b *darwinBackend) ToggleAutostart() error {
 }
 
 func (b *darwinBackend) OnExit() {
+	if b.unlock != nil {
+		defer b.unlock()
+	}
 	cfg, _, err := config.Load(b.cfgPath)
 	if err == nil {
 		_ = runner.DisableOwnedProxy(cfg.Ports.Mixed)
@@ -183,20 +196,12 @@ func (b *darwinBackend) withConfig(fn func(*config.Config) error) error {
 	return fn(cfg)
 }
 
-// ensureWorkingDir mirrors the Windows tray: resolve the bundled example
-// config next to the executable, then move the working directory to the local
-// data directory (~/Library/Application Support/MeshMux, or $MESHMUX_HOME) so
-// every relative runtime path — bin/mihomo, state/, dashboard/ — resolves
-// there. The macOS bundle installs itself into that directory, so the
-// executable directory and the data directory coincide; see
-// packaging/macos/README.release.md.
+// ensureWorkingDir keeps writable data outside the application. Resources in
+// Contents/Resources (or beside portable executables) seed fresh installations;
+// all runtime paths resolve under Application Support/MeshMux or MESHMUX_HOME.
 func ensureWorkingDir() (string, error) {
 	cwdExample, _ := filepath.Abs(config.ExampleConfigPath)
-	exe, err := os.Executable()
-	if err != nil {
-		return config.LocalConfigPath(), err
-	}
-	dir := filepath.Dir(exe)
+	dir := config.BundleDir()
 	exeExample := filepath.Join(dir, "meshmux.example.json")
 	example := exeExample
 	if _, err := os.Stat(example); err != nil {

@@ -203,6 +203,16 @@
             <button id="tsConfigBtn" onclick="openModal('modalTailscale')">登记 Tailscale</button>
             <button id="tsLoginBtn" class="hidden primary" onclick="runAction('tailscale-up')">登录 Tailnet</button>
           </div>
+          <div class="{{MAC_TAILNET_CLASS}}">
+            <p>Tailnet 是独立开机网络服务；退出菜单栏不会断开。以下操作会请求管理员授权，取消不自动重试。</p>
+            <div class="actions">
+              <button onclick="runAction('mac-tailnet-install')">安装/修复 Tailnet 服务</button>
+              <button onclick="runAction('mac-tailnet-start')">启动服务（开机启用）</button>
+              <button onclick="runAction('mac-tailnet-stop')">停止服务（开机禁用）</button>
+              <button onclick="runAction('mac-tailnet-restart')">重启服务</button>
+              <button onclick="runAction('mac-tailnet-down')">断开 Tailnet（保留身份）</button>
+            </div>
+          </div>
         </div>
 
         <div class="panel">

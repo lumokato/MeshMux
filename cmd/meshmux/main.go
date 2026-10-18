@@ -229,6 +229,8 @@ func run(args []string) error {
 	case "autostart":
 		mode := commandArg(args[1:], "show")
 		return runner.Autostart(mode)
+	case "tailnet-service":
+		return macTailnetService(args[1:])
 	case "tailscale":
 		return tailscaleCommand(args[1:])
 	case "service":
