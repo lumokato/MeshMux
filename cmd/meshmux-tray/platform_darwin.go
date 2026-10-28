@@ -57,6 +57,13 @@ func (b *darwinBackend) InitialStart() error {
 	// The tray starts or observes the core only. Upstream reachability and
 	// proxy selection are independent user-visible runtime states.
 	return b.withConfig(func(cfg *config.Config) error {
+		if runner.CoreDaemonInstalled() {
+			// The root LaunchDaemon owns start, stop and self-healing. The tray
+			// only re-applies the user's system-proxy intent; it never starts a
+			// second core or asks for a password at login.
+			b.restoreProxyIntent()
+			return nil
+		}
 		if runner.IsRunning(cfg) {
 			b.restoreProxyIntent()
 			return nil
@@ -99,10 +106,16 @@ func (b *darwinBackend) State() (trayState, error) {
 	state := trayState{
 		SystemProxyOn:    runner.ProxyEnabled(),
 		AutostartEnabled: runner.AutostartEnabled(),
+		CoreDaemon:       runner.CoreDaemonInstalled(),
 	}
 	cfg, _, err := config.Load(b.cfgPath)
 	if err != nil {
 		return state, err
+	}
+	if state.CoreDaemon {
+		_, running := runner.CoreDaemonPID()
+		state.CoreRunning = running
+		return state, nil
 	}
 	state.CoreRunning = runner.IsRunning(cfg)
 	return state, nil
@@ -125,6 +138,16 @@ func (b *darwinBackend) OpenDashboard() error {
 }
 
 func (b *darwinBackend) ToggleCore() error {
+	if runner.CoreDaemonInstalled() {
+		// Stopping or starting the protected service is a system change; the
+		// daemon keeps ownership and the tray only requests the action.
+		action := "start"
+		if _, running := runner.CoreDaemonPID(); running {
+			action = "stop"
+		}
+		_, err := runner.CoreDaemonService(context.Background(), action)
+		return err
+	}
 	return b.withConfig(func(cfg *config.Config) error {
 		if runner.IsRunning(cfg) {
 			if err := runner.DisableOwnedProxy(cfg.Ports.Mixed); err != nil {
@@ -141,6 +164,10 @@ func (b *darwinBackend) ToggleCore() error {
 }
 
 func (b *darwinBackend) RestartCore() error {
+	if runner.CoreDaemonInstalled() {
+		_, err := runner.CoreDaemonService(context.Background(), "restart")
+		return err
+	}
 	return b.withConfig(func(cfg *config.Config) error {
 		profile, err := generator.GenerateNamed(cfg, "darwin")
 		if err != nil {
@@ -175,6 +202,16 @@ func (b *darwinBackend) ToggleAutostart() error {
 func (b *darwinBackend) OnExit() {
 	if b.unlock != nil {
 		defer b.unlock()
+	}
+	if runner.CoreDaemonInstalled() {
+		// The root daemon is an independent network service. Quitting the menu
+		// bar UI must not stop the core or rewrite the system proxy.
+		if b.server != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = b.server.Shutdown(ctx)
+		}
+		return
 	}
 	cfg, _, err := config.Load(b.cfgPath)
 	if err == nil {

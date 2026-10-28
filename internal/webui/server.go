@@ -709,6 +709,15 @@ func (s *Server) actionAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 			}
 			message = "已生成: " + path
 		}
+		if goos == "darwin" && runner.CoreDaemonInstalled() {
+			// 系统守护只读受保护副本；显式生成动作同时刷新 root 副本并重启核心。
+			out, err := runner.CoreDaemonService(r.Context(), "sync")
+			if err != nil {
+				http.Error(w, runner.RedactLogText(err.Error()), http.StatusBadGateway)
+				return
+			}
+			message += "；系统守护已同步：" + out
+		}
 	case "start":
 		if goos == "windows" {
 			action := "activate"
@@ -720,6 +729,15 @@ func (s *Server) actionAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 				return
 			}
 			message = "核心服务已启动"
+			break
+		}
+		if goos == "darwin" && runner.CoreDaemonInstalled() {
+			out, err := runner.CoreDaemonService(r.Context(), "start")
+			if err != nil {
+				http.Error(w, runner.RedactLogText(err.Error()), http.StatusBadGateway)
+				return
+			}
+			message = out
 			break
 		}
 		target := req.Target
@@ -743,6 +761,15 @@ func (s *Server) actionAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 				return
 			}
 			message = "已请求停止核心服务"
+			break
+		}
+		if goos == "darwin" && runner.CoreDaemonInstalled() {
+			out, err := runner.CoreDaemonService(r.Context(), "stop")
+			if err != nil {
+				http.Error(w, runner.RedactLogText(err.Error()), http.StatusBadGateway)
+				return
+			}
+			message = out
 			break
 		}
 		if err := runner.Stop(cfg); err != nil {
@@ -857,6 +884,10 @@ func (s *Server) actionAPIFor(goos string, w http.ResponseWriter, r *http.Reques
 		}
 		message = fmt.Sprintf("手机配置已上传: %s sha256=%s", result.URL, result.SHA256)
 	case "status":
+		if goos == "darwin" && runner.CoreDaemonInstalled() {
+			message = runner.CoreDaemonStatus()
+			break
+		}
 		message = runner.Status(cfg)
 	default:
 		http.Error(w, "unknown action", http.StatusBadRequest)

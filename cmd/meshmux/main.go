@@ -229,6 +229,8 @@ func run(args []string) error {
 	case "autostart":
 		mode := commandArg(args[1:], "show")
 		return runner.Autostart(mode)
+	case "core-service":
+		return coreService(args[1:])
 	case "tailnet-service":
 		return macTailnetService(args[1:])
 	case "tailscale":
@@ -680,6 +682,7 @@ Usage:
   meshmux proxy on|off|show [-config path]
   meshmux autostart on|off|show
   meshmux tailscale up|down|status [-config path]
+  meshmux core-service status|plan|install|sync|uninstall|start|stop|restart
   meshmux service install|activate|remove|start|stop|restart|status [-config path]
   meshmux version
 `)

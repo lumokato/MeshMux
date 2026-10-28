@@ -64,6 +64,21 @@ These source changes require fresh runtime acceptance. Earlier deployment result
 
 Do not interpret this review as proof that every defect has been eliminated.
 
+## macOS core ownership
+
+On macOS the mihomo core belongs to the root LaunchDaemon `com.meshmux.core`
+when that service is installed. The job runs the same `_supervise` entry point
+as manual mode, with `-config` and `-profile` pointing at root-owned files under
+`/Library/Application Support/MeshMux/core`. The user LaunchAgent
+`com.meshmux.agent` keeps only the menu-bar UI and proxy intent; it must not
+start a second core or stop the daemon's core on exit.
+
+The protected copy is written only by the explicit administrator-authorized
+install/update step, which reads the member configuration once, regenerates the
+profile from that copy, and rejects absolute or escaping path fields. Runtime
+reads of the member configuration by the daemon are forbidden. See
+`docs/CORE-DAEMON-macos.md`.
+
 ## Tailscale supervision
 
 The daemon is a child process with a private state directory and a single IPC

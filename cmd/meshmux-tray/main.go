@@ -17,6 +17,7 @@ type trayCapabilities struct {
 type trayState struct {
 	CoreRunning      bool
 	CoreDegraded     bool
+	CoreDaemon       bool
 	SystemProxyOn    bool
 	AutostartEnabled bool
 }
@@ -118,7 +119,8 @@ func onReady() {
 	go runMenuLoop(mOpenConfig, mOpenDashboard, mRestart, mQuit)
 }
 
-func runMenuLoop(mOpenConfig, mOpenDashboard, mRestart, mQuit *systray.MenuItem) {	ticker := time.NewTicker(menuRefreshInterval)
+func runMenuLoop(mOpenConfig, mOpenDashboard, mRestart, mQuit *systray.MenuItem) {
+	ticker := time.NewTicker(menuRefreshInterval)
 	defer ticker.Stop()
 
 	initialDone := make(chan error, 1)
@@ -188,7 +190,13 @@ func refreshAfterAction() {
 func refreshMenuState() error {
 	state, err := backend.State()
 	if mCore != nil {
-		if state.CoreRunning && state.CoreDegraded {
+		if state.CoreDaemon && state.CoreRunning {
+			mCore.Check()
+			mCore.SetTitle("核心运行：系统守护")
+		} else if state.CoreDaemon {
+			mCore.Uncheck()
+			mCore.SetTitle("核心运行：系统守护未运行")
+		} else if state.CoreRunning && state.CoreDegraded {
 			mCore.Check()
 			mCore.SetTitle("核心运行：服务异常")
 		} else if state.CoreRunning {

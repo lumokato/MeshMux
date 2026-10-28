@@ -14,7 +14,9 @@ import (
 )
 
 // macOS autostart uses a per-user LaunchAgent. Writing the plist is the
-// authoritative state; launchctl is only asked to load or unload it.
+// authoritative state; launchctl is only asked to load or unload it. KeepAlive
+// keeps the menu-bar UI available after an accidental crash; the core itself
+// belongs to the root LaunchDaemon when that is installed.
 const darwinLaunchAgentLabel = "com.meshmux.agent"
 
 func darwinLaunchAgentPath() (string, error) {
@@ -47,7 +49,7 @@ func darwinLaunchAgentContent(executable string) (string, error) {
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<false/>
+	<true/>
 </dict>
 </plist>
 `, darwinLaunchAgentLabel, escaped.String()), nil
