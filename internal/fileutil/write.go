@@ -14,7 +14,9 @@ func WriteFile(path string, data []byte, mode os.FileMode) error {
 }
 
 func Write(path string, mode os.FileMode, write func(io.Writer) error) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	dir := filepath.Dir(path)
+	created := missingDirs(dir)
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
 	temp, err := os.CreateTemp(filepath.Dir(path), ".meshmux-*")
@@ -35,5 +37,30 @@ func Write(path string, mode os.FileMode, write func(io.Writer) error) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	return replace(temp.Name(), path)
+	if err := replace(temp.Name(), path); err != nil {
+		return err
+	}
+	restoreOwner(path, created)
+	return nil
+}
+
+// missingDirs lists the directories below dir that do not exist yet, outermost
+// first, so a sudo run can hand them back to the invoking user.
+func missingDirs(dir string) []string {
+	var missing []string
+	for p := filepath.Clean(dir); ; {
+		if _, err := os.Stat(p); err == nil {
+			break
+		}
+		missing = append(missing, p)
+		parent := filepath.Dir(p)
+		if parent == p {
+			break
+		}
+		p = parent
+	}
+	for i, j := 0, len(missing)-1; i < j; i, j = i+1, j-1 {
+		missing[i], missing[j] = missing[j], missing[i]
+	}
+	return missing
 }
